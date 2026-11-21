@@ -1,7 +1,8 @@
 """Configura a inicialização automática do Mini Deck IoT no Windows 11 (shell:startup).
 
-Cria (ou atualiza) o atalho 'MiniDeckIoT.lnk' apontando para 'backend/run_hidden.vbs'
-na pasta de Inicialização do usuário atual.
+Cria (ou atualiza) o atalho 'MiniDeckIoT.lnk' na pasta de Inicialização do usuário atual:
+- Modo padrão: aponta diretamente para 'backend/dist/MiniDeckBridge.exe' (executável autônomo).
+- Fallback (--vbs): aponta para 'backend/run_hidden.vbs' caso o .exe ainda não tenha sido gerado.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+from typing import Optional
 
 import comtypes
 import comtypes.client
@@ -24,30 +26,53 @@ def get_startup_dir() -> Path:
     return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 
 
-def install_startup_shortcut() -> Path:
+def install_startup_shortcut(
+    exe_override: Optional[str] = None,
+    use_vbs: bool = False,
+) -> tuple[Path, str]:
     backend_dir = Path(__file__).resolve().parent
+    default_exe = backend_dir / "dist" / "MiniDeckBridge.exe"
     vbs_path = backend_dir / "run_hidden.vbs"
-    if not vbs_path.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {vbs_path}")
 
     startup_dir = get_startup_dir()
     startup_dir.mkdir(parents=True, exist_ok=True)
     shortcut_path = startup_dir / SHORTCUT_NAME
 
+    if use_vbs:
+        if not vbs_path.exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {vbs_path}")
+        target_path = "wscript.exe"
+        arguments = f'"{vbs_path}"'
+        working_dir = str(backend_dir)
+        window_style = 7
+        target_summary = f'wscript.exe "{vbs_path}"'
+    else:
+        exe_path = Path(exe_override).resolve() if exe_override else default_exe
+        if not exe_path.exists():
+            raise FileNotFoundError(
+                f"Executável não encontrado: {exe_path}\n"
+                "Gere o MiniDeckBridge.exe com o PyInstaller ou use --vbs."
+            )
+        target_path = str(exe_path)
+        arguments = ""
+        working_dir = str(exe_path.parent)
+        window_style = 1
+        target_summary = str(exe_path)
+
     comtypes.CoInitialize()
     try:
         shell = comtypes.client.CreateObject("WScript.Shell", dynamic=True)
         shortcut = shell.CreateShortcut(str(shortcut_path))
-        shortcut.TargetPath = "wscript.exe"
-        shortcut.Arguments = f'"{vbs_path}"'
-        shortcut.WorkingDirectory = str(backend_dir)
-        shortcut.Description = "Mini Deck IoT - Bridge Wi-Fi WebSocket de Controle de Áudio (ESP32-S3)"
-        shortcut.WindowStyle = 7  # Minimizado/oculto
+        shortcut.TargetPath = target_path
+        shortcut.Arguments = arguments
+        shortcut.WorkingDirectory = working_dir
+        shortcut.Description = "Mini Deck IoT - Bridge Wi-Fi WebSocket Autônoma (ESP32-S3)"
+        shortcut.WindowStyle = window_style
         shortcut.Save()
     finally:
         comtypes.CoUninitialize()
 
-    return shortcut_path
+    return shortcut_path, target_summary
 
 
 def remove_startup_shortcut() -> bool:
@@ -66,6 +91,16 @@ def main() -> None:
         description="Gerencia o atalho de autoinicialização do Mini Deck IoT no Windows 11."
     )
     parser.add_argument(
+        "--exe",
+        default=None,
+        help="Caminho personalizado para o MiniDeckBridge.exe",
+    )
+    parser.add_argument(
+        "--vbs",
+        action="store_true",
+        help="Cria atalho usando run_hidden.vbs (Python) em vez do MiniDeckBridge.exe",
+    )
+    parser.add_argument(
         "--remove",
         action="store_true",
         help="Remove o atalho da pasta de Inicialização do Windows",
@@ -80,15 +115,17 @@ def main() -> None:
             print("Nenhum atalho do Mini Deck IoT encontrado na pasta de Inicialização.")
         return
 
-    shortcut_path = install_startup_shortcut()
-    backend_dir = Path(__file__).resolve().parent
-    print("=" * 64)
+    shortcut_path, target_summary = install_startup_shortcut(
+        exe_override=args.exe,
+        use_vbs=args.vbs,
+    )
+    print("=" * 68)
     print("  Mini Deck IoT - Autoinicialização Configurada (Windows 11)")
-    print("=" * 64)
+    print("=" * 68)
     print(f"  Atalho criado : {shortcut_path}")
-    print(f"  Alvo          : wscript.exe \"{backend_dir / 'run_hidden.vbs'}\"")
+    print(f"  Alvo          : {target_summary}")
     print(f"  Pasta Startup : {get_startup_dir()}")
-    print("=" * 64)
+    print("=" * 68)
 
 
 if __name__ == "__main__":

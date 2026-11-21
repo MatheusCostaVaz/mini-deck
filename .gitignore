@@ -4,12 +4,14 @@ venv/
 __pycache__/
 *.py[cod]
 *$py.class
+backend/build/
+backend/dist/
 
-# PlatformIO e Builds
+# PlatformIO
 .pio/
 .vscode/
 
-# Logs e arquivos locais do sistema
+# Logs e temporários
 *.log
 Thumbs.db
 desktop.ini

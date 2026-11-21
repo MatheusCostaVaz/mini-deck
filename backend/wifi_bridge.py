@@ -84,7 +84,10 @@ APP_PING_INTERVAL_S = 2.0
 RECONNECT_DELAY_S = 2.0
 RECENT_ESP_WRITE_GRACE_S = 0.35
 
-BACKEND_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    BACKEND_DIR = Path(sys.executable).resolve().parent
+else:
+    BACKEND_DIR = Path(__file__).resolve().parent
 LOG_PATH = BACKEND_DIR / "wifi_bridge.log"
 MUTEX_NAME = "Local\\MiniDeckIoT_WiFiBridge_Mutex"
 
