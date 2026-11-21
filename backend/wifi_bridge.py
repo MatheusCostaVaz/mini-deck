@@ -20,6 +20,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import shutil
 import socket
 import sys
 import time
@@ -27,10 +28,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from _ctypes import COMError
+import psutil
 import websockets
 from websockets.exceptions import WebSocketException
 
 from audio_controller import AudioAppSession, AudioController
+from media_controller import MediaController, MediaSnapshot
 
 BROWSER_CANDIDATES = (
     "msedge.exe",
@@ -80,6 +83,7 @@ FRIENDLY_LABELS = {
 DEFAULT_UDP_PORT = 4210
 DEFAULT_WS_PORT = 81
 POLL_INTERVAL_S = 0.25
+STATS_POLL_TICKS = 6  # 6 * 0.25s = 1.5s
 APP_PING_INTERVAL_S = 2.0
 RECONNECT_DELAY_S = 2.0
 RECENT_ESP_WRITE_GRACE_S = 0.35
@@ -152,6 +156,256 @@ def _release_mutex(handle) -> None:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+class _NvmlUtilization(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+
+class _PdhFmtCounterValue(ctypes.Structure):
+    _fields_ = [
+        ("CStatus", ctypes.c_uint32),
+        ("_pad", ctypes.c_uint32),
+        ("doubleValue", ctypes.c_double),
+    ]
+
+
+class _PdhFmtCounterValueItemW(ctypes.Structure):
+    _fields_ = [
+        ("szName", ctypes.c_wchar_p),
+        ("FmtValue", _PdhFmtCounterValue),
+    ]
+
+
+class GpuMonitor:
+    """Leitor leve e não bloqueante de utilização de GPU (%) no Windows.
+
+    Ordem de prioridade:
+      1. NVIDIA NVML (nvml.dll via ctypes) -> < 1 ms em memória, sem abrir subprocessos.
+      2. nvidia-smi assíncrono (CREATE_NO_WINDOW) -> fallback para GPUs NVIDIA.
+      3. Windows PDH (\\GPU Engine(*)\\Utilization Percentage) -> Intel/AMD integrada ou dedicada.
+      4. Fallback seguro -> 0%.
+    """
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._log = logger
+        self.backend = "none"
+        self.gpu_name = "N/A"
+
+        # Estado NVML
+        self._nvml = None
+        self._nvml_dev = None
+
+        # Estado nvidia-smi
+        self._nvidia_smi_path: Optional[str] = None
+
+        # Estado Windows PDH
+        self._pdh = None
+        self._pdh_query = None
+        self._pdh_counter = None
+
+        self._init_backend()
+
+    def _init_backend(self) -> None:
+        if self._try_init_nvml():
+            return
+        smi = shutil.which("nvidia-smi")
+        if smi:
+            self._nvidia_smi_path = smi
+            self.backend = "nvidia-smi"
+            self.gpu_name = "NVIDIA GPU"
+            return
+        if self._try_init_pdh():
+            return
+        self.backend = "none"
+
+    def _try_init_nvml(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            nvml = ctypes.WinDLL("nvml.dll")
+            nvml.nvmlInit_v2.restype = ctypes.c_int
+            nvml.nvmlShutdown.restype = ctypes.c_int
+            nvml.nvmlDeviceGetHandleByIndex_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+            nvml.nvmlDeviceGetHandleByIndex_v2.restype = ctypes.c_int
+            nvml.nvmlDeviceGetUtilizationRates.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NvmlUtilization)]
+            nvml.nvmlDeviceGetUtilizationRates.restype = ctypes.c_int
+            nvml.nvmlDeviceGetName.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
+            nvml.nvmlDeviceGetName.restype = ctypes.c_int
+
+            if nvml.nvmlInit_v2() != 0:
+                return False
+            dev = ctypes.c_void_p()
+            if nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) != 0:
+                nvml.nvmlShutdown()
+                return False
+
+            name_buf = ctypes.create_string_buffer(96)
+            if nvml.nvmlDeviceGetName(dev, name_buf, len(name_buf)) == 0:
+                self.gpu_name = name_buf.value.decode("utf-8", errors="replace").strip() or "NVIDIA GPU"
+            else:
+                self.gpu_name = "NVIDIA GPU"
+
+            self._nvml = nvml
+            self._nvml_dev = dev
+            self.backend = "nvml"
+            return True
+        except (OSError, AttributeError):
+            return False
+
+    def _try_init_pdh(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            pdh = ctypes.WinDLL("pdh.dll")
+            pdh.PdhOpenQueryW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+            pdh.PdhOpenQueryW.restype = ctypes.c_uint32
+            pdh.PdhAddEnglishCounterW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            pdh.PdhAddEnglishCounterW.restype = ctypes.c_uint32
+            pdh.PdhCollectQueryData.argtypes = [ctypes.c_void_p]
+            pdh.PdhCollectQueryData.restype = ctypes.c_uint32
+            pdh.PdhGetFormattedCounterArrayW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.c_void_p,
+            ]
+            pdh.PdhGetFormattedCounterArrayW.restype = ctypes.c_uint32
+            pdh.PdhCloseQuery.argtypes = [ctypes.c_void_p]
+            pdh.PdhCloseQuery.restype = ctypes.c_uint32
+
+            query = ctypes.c_void_p()
+            if pdh.PdhOpenQueryW(None, None, ctypes.byref(query)) != 0:
+                return False
+
+            counter = ctypes.c_void_p()
+            status = pdh.PdhAddEnglishCounterW(
+                query,
+                r"\GPU Engine(*)\Utilization Percentage",
+                None,
+                ctypes.byref(counter),
+            )
+            if status != 0:
+                pdh.PdhCloseQuery(query)
+                return False
+
+            # Primeira coleta inicializa a janela de amostragem do contador
+            pdh.PdhCollectQueryData(query)
+            self._pdh = pdh
+            self._pdh_query = query
+            self._pdh_counter = counter
+            self.backend = "pdh"
+            self.gpu_name = "Windows GPU (PDH)"
+            return True
+        except (OSError, AttributeError):
+            return False
+
+    def _read_pdh_sync(self) -> int:
+        if not self._pdh or not self._pdh_query or not self._pdh_counter:
+            return 0
+        try:
+            if self._pdh.PdhCollectQueryData(self._pdh_query) != 0:
+                return 0
+            PDH_FMT_DOUBLE = 0x00000200
+            PDH_MORE_DATA = 0x800007D2
+            buf_size = ctypes.c_uint32(0)
+            item_count = ctypes.c_uint32(0)
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                None,
+            )
+            if status != PDH_MORE_DATA or buf_size.value == 0:
+                return 0
+
+            raw_buf = (ctypes.c_byte * buf_size.value)()
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                ctypes.byref(raw_buf),
+            )
+            if status != 0 or item_count.value == 0:
+                return 0
+
+            items = ctypes.cast(raw_buf, ctypes.POINTER(_PdhFmtCounterValueItemW))
+            # Soma por tipo de engine (ex.: engtype_3D, engtype_VideoDecode) e pega o maior
+            by_engine: dict[str, float] = {}
+            for i in range(item_count.value):
+                item = items[i]
+                if item.FmtValue.CStatus != 0:
+                    continue
+                val = item.FmtValue.doubleValue
+                if val <= 0.0:
+                    continue
+                name = item.szName or ""
+                key = name.split("engtype_")[-1] if "engtype_" in name else "total"
+                by_engine[key] = by_engine.get(key, 0.0) + val
+
+            peak = max(by_engine.values(), default=0.0)
+            return int(round(max(0.0, min(100.0, peak))))
+        except (OSError, ValueError):
+            return 0
+
+    async def read_percent(self) -> int:
+        if self.backend == "nvml" and self._nvml and self._nvml_dev:
+            try:
+                util = _NvmlUtilization()
+                if self._nvml.nvmlDeviceGetUtilizationRates(self._nvml_dev, ctypes.byref(util)) == 0:
+                    return int(max(0, min(100, util.gpu)))
+            except OSError:
+                pass
+            return 0
+
+        if self.backend == "nvidia-smi" and self._nvidia_smi_path:
+            try:
+                creationflags = 0x08000000 if os.name == "nt" else 0
+                proc = await asyncio.create_subprocess_exec(
+                    self._nvidia_smi_path,
+                    "--query-gpu=utilization.gpu",
+                    "--format=csv,noheader,nounits",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=creationflags,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1.0)
+                if proc.returncode == 0 and stdout:
+                    first_line = stdout.decode("utf-8", errors="replace").splitlines()[0].strip()
+                    return int(round(max(0.0, min(100.0, float(first_line)))))
+            except (OSError, asyncio.TimeoutError, ValueError, IndexError):
+                return 0
+            return 0
+
+        if self.backend == "pdh":
+            return self._read_pdh_sync()
+
+        return 0
+
+    def close(self) -> None:
+        if self._nvml is not None:
+            try:
+                self._nvml.nvmlShutdown()
+            except OSError:
+                pass
+            self._nvml = None
+            self._nvml_dev = None
+        if self._pdh is not None and self._pdh_query is not None:
+            try:
+                self._pdh.PdhCloseQuery(self._pdh_query)
+            except OSError:
+                pass
+            self._pdh = None
+            self._pdh_query = None
+            self._pdh_counter = None
+
+
 class _UdpDiscoveryProtocol(asyncio.DatagramProtocol):
     def __init__(self, future: asyncio.Future, logger: logging.Logger) -> None:
         self._future = future
@@ -195,12 +449,17 @@ class MiniDeckWiFiBridge:
 
         self._last_channels: dict[str, ChannelSnapshot] = {}
         self._last_mic_mute: Optional[bool] = None
+        self._last_media: Optional[MediaSnapshot] = None
+        self._media = MediaController()
         self._last_esp_write_ts: dict[str, float] = {}
         self._resolved_processes: dict[str, Optional[str]] = {
             "browser": None,
             "discord": None,
             "game": None,
         }
+        # Inicializa o contador não-bloqueante de CPU do psutil e leitor de GPU
+        psutil.cpu_percent(interval=None)
+        self._gpu = GpuMonitor(self.log)
 
     # ------------------------------------------------------------------
     # Auto-Discovery UDP (porta 4210)
@@ -421,13 +680,120 @@ class MiniDeckWiFiBridge:
         self._last_channels = channels
         self._last_mic_mute = mic_mute
 
+    async def _sync_browser_channel(self, ws, audio: AudioController) -> None:
+        channels, _ = self._read_windows_state(audio)
+        snap = channels.get("browser")
+        if snap is None:
+            return
+        await self._send_json(ws, {"sync": "label", "target": "browser", "val": snap.label})
+        await self._send_json(ws, {"sync": "vol", "target": "browser", "val": snap.volume})
+        await self._send_json(ws, {"sync": "mute", "target": "browser", "val": snap.muted})
+        self._last_channels["browser"] = snap
+
+    async def _sync_media_to_esp32(
+        self,
+        ws,
+        audio: Optional[AudioController] = None,
+        force: bool = False,
+    ) -> None:
+        snap = await self._media.get_current_media()
+        if force or self._last_media != snap:
+            await self._send_json(
+                ws,
+                {
+                    "sync": "media",
+                    "title": snap.title,
+                    "artist": snap.artist,
+                    "playing": snap.playing,
+                },
+            )
+            if audio is not None:
+                await self._sync_browser_channel(ws, audio)
+            if not force or self._last_media is None:
+                estado = "TOCANDO" if snap.playing else "PAUSADO"
+                self.log.info(
+                    "[Windows -> WiFi] Mídia (%s): %s - %s",
+                    estado,
+                    snap.title,
+                    snap.artist,
+                )
+            self._last_media = snap
+
+    async def _read_system_stats(self) -> dict:
+        cpu_pct = int(round(max(0.0, min(100.0, psutil.cpu_percent(interval=None)))))
+        gpu_pct = await self._gpu.read_percent()
+        vm = psutil.virtual_memory()
+        ram_pct = int(round(max(0.0, min(100.0, vm.percent))))
+        gb = 1024.0 ** 3
+        ram_used = f"{vm.used / gb:.1f}"
+        ram_total = f"{vm.total / gb:.1f}"
+
+        disk_pct = -1
+        try:
+            disk_pct = int(round(max(0.0, min(100.0, psutil.disk_usage("C:\\").percent))))
+        except OSError:
+            disk_pct = -1
+
+        payload: dict = {
+            "sync": "stats",
+            "cpu": cpu_pct,
+            "gpu": gpu_pct,
+            "ram_pct": ram_pct,
+            "ram_used": ram_used,
+            "ram_total": ram_total,
+        }
+        if disk_pct >= 0:
+            payload["disk_pct"] = disk_pct
+        return payload
+
+    async def _sync_stats_to_esp32(self, ws, log_once: bool = False) -> None:
+        stats = await self._read_system_stats()
+        await self._send_json(ws, stats)
+        if log_once:
+            disk_str = f" | Disco C: {stats['disk_pct']}%" if "disk_pct" in stats else ""
+            self.log.info(
+                "  Hardware       -> CPU: %d%% | GPU: %d%% (%s) | RAM: %d%% (%s / %s GB)%s",
+                stats["cpu"],
+                stats["gpu"],
+                self._gpu.gpu_name,
+                stats["ram_pct"],
+                stats["ram_used"],
+                stats["ram_total"],
+                disk_str,
+            )
+
     # ------------------------------------------------------------------
     # Aplicação de Eventos ESP32 -> Windows
     # ------------------------------------------------------------------
 
     async def _handle_esp_event(self, ws, audio: AudioController, msg: dict) -> None:
+        cmd = str(msg.get("cmd", "")).lower()
         event = str(msg.get("event", "")).lower()
         target = str(msg.get("target", "")).lower()
+
+        if cmd == "media":
+            action = str(msg.get("action", "")).lower()
+            if action in ("play_pause", "next", "prev"):
+                ok = await self._media.handle_action(action)
+                self.log.info(
+                    "[ESP32 WiFi -> Windows] Comando de mídia '%s' -> %s",
+                    action,
+                    "OK" if ok else "FALHA",
+                )
+                await asyncio.sleep(0.15)
+                await self._sync_media_to_esp32(ws, audio=audio, force=True)
+            return
+
+        if event == "screen":
+            screen = str(msg.get("screen", "")).lower()
+            if screen == "media":
+                self.log.info("[ESP32 WiFi] Tela Mídia aberta -> sincronizando Edge e Now Playing...")
+                await self._sync_browser_channel(ws, audio)
+                await self._sync_media_to_esp32(ws, audio=None, force=True)
+            elif screen == "hardware":
+                self.log.info("[ESP32 WiFi] Tela Hardware aberta -> enviando telemetria CPU/RAM...")
+                await self._sync_stats_to_esp32(ws, log_once=False)
+            return
 
         if event == "pong":
             return
@@ -435,6 +801,8 @@ class MiniDeckWiFiBridge:
         if event == "ready":
             self.log.info("[ESP32 WiFi] Placa pronta -> enviando sincronização completa...")
             await self._sync_to_esp32(ws, audio, force_all=True)
+            await self._sync_media_to_esp32(ws, audio=None, force=True)
+            await self._sync_stats_to_esp32(ws, log_once=False)
             return
 
         if event == "set_vol" and target:
@@ -534,6 +902,8 @@ class MiniDeckWiFiBridge:
         deadline: Optional[float],
     ) -> None:
         await self._sync_to_esp32(ws, audio, force_all=True)
+        await self._sync_media_to_esp32(ws, audio=audio, force=True)
+        await self._sync_stats_to_esp32(ws, log_once=True)
 
         for target, snap in self._last_channels.items():
             proc_info = snap.process_name or "aguardando app"
@@ -572,11 +942,17 @@ class MiniDeckWiFiBridge:
 
         async def poll_task() -> None:
             last_ping = time.monotonic()
+            tick_count = 0
             while True:
                 if deadline is not None and time.monotonic() >= deadline:
                     return
                 await asyncio.sleep(POLL_INTERVAL_S)
+                tick_count += 1
                 await self._sync_to_esp32(ws, audio, force_all=False)
+                if tick_count % 2 == 0:
+                    await self._sync_media_to_esp32(ws, audio=audio, force=False)
+                if tick_count % STATS_POLL_TICKS == 0:
+                    await self._sync_stats_to_esp32(ws, log_once=False)
                 now = time.monotonic()
                 if (now - last_ping) >= APP_PING_INTERVAL_S:
                     last_ping = now
@@ -610,59 +986,62 @@ class MiniDeckWiFiBridge:
         deadline = (time.monotonic() + duration_seconds) if duration_seconds is not None else None
         last_endpoint: Optional[tuple[str, int]] = None
 
-        with AudioController() as audio:
-            self.log.info("Saída padrão : %s", audio.get_master_device_name() or "N/A")
-            self.log.info("Microfone    : %s", audio.get_mic_device_name() or "N/A")
+        try:
+            with AudioController() as audio:
+                self.log.info("Saída padrão : %s", audio.get_master_device_name() or "N/A")
+                self.log.info("Microfone    : %s", audio.get_mic_device_name() or "N/A")
+                self.log.info("GPU Monitor  : %s [%s]", self._gpu.gpu_name, self._gpu.backend)
 
-            while True:
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-
-                # 1. Descobre o IP do ESP32 via UDP 4210 (ou usa último IP conhecido / fixo)
-                if last_endpoint is None:
-                    remaining = (deadline - time.monotonic()) if deadline is not None else None
-                    if remaining is not None and remaining <= 0:
+                while True:
+                    if deadline is not None and time.monotonic() >= deadline:
                         break
-                    endpoint = await self.discover_device(timeout=remaining)
-                    if endpoint is None:
-                        break
-                else:
-                    endpoint = last_endpoint
 
-                ip, port = endpoint
-                uri = f"ws://{ip}:{port}"
-                self.log.info("Conectando via WebSocket em %s ...", uri)
-
-                try:
-                    async with websockets.connect(
-                        uri,
-                        open_timeout=4.0,
-                        ping_interval=3.0,
-                        ping_timeout=3.0,
-                        close_timeout=1.0,
-                    ) as ws:
-                        last_endpoint = endpoint
-                        self.log.info("Conectado com sucesso em %s!", uri)
-                        await self._run_ws_session(ws, audio, deadline)
-
-                        if deadline is not None and time.monotonic() >= deadline:
+                    # 1. Descobre o IP do ESP32 via UDP 4210 (ou usa último IP conhecido / fixo)
+                    if last_endpoint is None:
+                        remaining = (deadline - time.monotonic()) if deadline is not None else None
+                        if remaining is not None and remaining <= 0:
                             break
-                        self.log.warning("Conexão WebSocket encerrada pelo ESP32.")
-                except (WebSocketException, OSError, asyncio.TimeoutError) as exc:
-                    self.log.warning(
-                        "Falha/queda na conexão com %s (%s). Redescobrindo em %.0fs...",
-                        uri,
-                        exc,
-                        RECONNECT_DELAY_S,
-                    )
-                    # Limpa IP em cache se não for fixo, para acompanhar eventual mudança de DHCP
-                    if not self.fixed_host:
-                        last_endpoint = None
+                        endpoint = await self.discover_device(timeout=remaining)
+                        if endpoint is None:
+                            break
+                    else:
+                        endpoint = last_endpoint
 
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-                await asyncio.sleep(RECONNECT_DELAY_S)
+                    ip, port = endpoint
+                    uri = f"ws://{ip}:{port}"
+                    self.log.info("Conectando via WebSocket em %s ...", uri)
 
+                    try:
+                        async with websockets.connect(
+                            uri,
+                            open_timeout=4.0,
+                            ping_interval=3.0,
+                            ping_timeout=3.0,
+                            close_timeout=1.0,
+                        ) as ws:
+                            last_endpoint = endpoint
+                            self.log.info("Conectado com sucesso em %s!", uri)
+                            await self._run_ws_session(ws, audio, deadline)
+
+                            if deadline is not None and time.monotonic() >= deadline:
+                                break
+                            self.log.warning("Conexão WebSocket encerrada pelo ESP32.")
+                    except (WebSocketException, OSError, asyncio.TimeoutError) as exc:
+                        self.log.warning(
+                            "Falha/queda na conexão com %s (%s). Redescobrindo em %.0fs...",
+                            uri,
+                            exc,
+                            RECONNECT_DELAY_S,
+                        )
+                        # Limpa IP em cache se não for fixo, para acompanhar eventual mudança de DHCP
+                        if not self.fixed_host:
+                            last_endpoint = None
+
+                    if deadline is not None and time.monotonic() >= deadline:
+                        break
+                    await asyncio.sleep(RECONNECT_DELAY_S)
+        finally:
+            self._gpu.close()
         self.log.info("Wi-Fi Bridge finalizada com segurança.")
 
 

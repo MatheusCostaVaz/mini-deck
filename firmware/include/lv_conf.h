@@ -23,10 +23,10 @@
 /*=========================
    MEMORY SETTINGS
  *=========================*/
-/* Heap interno rápido (64 KB em SRAM) para objetos LVGL; draw buffer fica em PSRAM */
+/* Heap interno rápido (96 KB em SRAM) para múltiplas telas LVGL; draw buffer fica em PSRAM */
 #define LV_MEM_CUSTOM 0
 #if LV_MEM_CUSTOM == 0
-    #define LV_MEM_SIZE (64U * 1024U)
+    #define LV_MEM_SIZE (96U * 1024U)
     #define LV_MEM_ADR 0
 #endif
 
@@ -119,7 +119,7 @@
 #define LV_FONT_MONTSERRAT_18 1
 #define LV_FONT_MONTSERRAT_20 1
 #define LV_FONT_MONTSERRAT_22 0
-#define LV_FONT_MONTSERRAT_24 0
+#define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_26 0
 #define LV_FONT_MONTSERRAT_28 0
 #define LV_FONT_MONTSERRAT_30 0

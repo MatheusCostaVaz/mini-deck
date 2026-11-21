@@ -293,6 +293,20 @@ static void sendMuteToggleEvent(const char *target)
     broadcastOutgoingEvent(buf);
 }
 
+static void sendMediaAction(const char *action)
+{
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"media\",\"action\":\"%s\"}", action);
+    broadcastOutgoingEvent(buf);
+}
+
+static void sendScreenChange(const char *screenName)
+{
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"event\":\"screen\",\"screen\":\"%s\"}", screenName);
+    broadcastOutgoingEvent(buf);
+}
+
 // ============================================================================
 // Tratamento Compartilhado de Comandos JSON (WebSocket e Serial)
 // ============================================================================
@@ -421,6 +435,33 @@ static void handleIncomingMessage(String line, bool fromWifi, uint8_t wsClientNu
         }
         validMessage = true;
     }
+    else if (strcmp(syncType, "media") == 0)
+    {
+        const char *title = doc["title"] | "Nenhuma mídia";
+        const char *artist = doc["artist"] | "";
+        bool playing = false;
+        if (doc["playing"].is<bool>())
+        {
+            playing = doc["playing"].as<bool>();
+        }
+        else
+        {
+            playing = (doc["playing"] | 0) != 0;
+        }
+        ui_sync_media(title, artist, playing);
+        validMessage = true;
+    }
+    else if (strcmp(syncType, "stats") == 0)
+    {
+        const int cpu = doc["cpu"] | 0;
+        const int gpu = doc["gpu"] | 0;
+        const int ramPct = doc["ram_pct"] | 0;
+        const char *ramUsed = doc["ram_used"] | "0.0";
+        const char *ramTotal = doc["ram_total"] | "0.0";
+        const int diskPct = doc["disk_pct"] | -1;
+        ui_sync_stats(cpu, gpu, ramPct, ramUsed, ramTotal, diskPct);
+        validMessage = true;
+    }
 
     if (validMessage)
     {
@@ -452,7 +493,7 @@ static void pollSerial()
             handleIncomingMessage(g_serial_rx, false, 0);
             g_serial_rx = "";
         }
-        else if (g_serial_rx.length() < 256)
+        else if (g_serial_rx.length() < 384)
         {
             g_serial_rx += c;
         }
@@ -715,7 +756,7 @@ void setup()
     g_indev_drv.read_cb = my_touch_read;
     lv_indev_drv_register(&g_indev_drv);
 
-    ui_init(sendVolumeEvent, sendMuteToggleEvent);
+    ui_init(sendVolumeEvent, sendMuteToggleEvent, sendMediaAction, sendScreenChange);
     lv_timer_handler();
 
     initWifiAsync();
