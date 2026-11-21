@@ -1,0 +1,15 @@
+# Ambientes Virtuais e Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PlatformIO e Builds
+.pio/
+.vscode/
+
+# Logs e arquivos locais do sistema
+*.log
+Thumbs.db
+desktop.ini
