@@ -535,9 +535,11 @@ class MiniDeckWiFiBridge:
         try:
             master_vol = audio.get_master_volume()
             master_mute = audio.get_master_mute()
-        except (RuntimeError, COMError, OSError):
+        except (COMError, Exception):
             audio.refresh_devices()
-            master_vol, master_mute = 100, False
+            prev_master = self._last_channels.get("master")
+            master_vol = prev_master.volume if prev_master else 100
+            master_mute = prev_master.muted if prev_master else False
 
         channels["master"] = ChannelSnapshot(
             volume=master_vol,
@@ -548,7 +550,7 @@ class MiniDeckWiFiBridge:
 
         try:
             sessions = audio.list_audio_sessions(active_only=False, group_by_app=True)
-        except (COMError, OSError):
+        except (COMError, Exception):
             audio.refresh_devices()
             sessions = []
 
@@ -613,13 +615,12 @@ class MiniDeckWiFiBridge:
                 process_name=None,
             )
 
-        mic_mute = False
-        if audio.has_microphone():
-            try:
+        mic_mute = self._last_mic_mute if self._last_mic_mute is not None else False
+        try:
+            if audio.has_microphone():
                 mic_mute = audio.get_mic_mute()
-            except (RuntimeError, COMError, OSError):
-                audio.refresh_devices()
-                mic_mute = False
+        except (COMError, Exception):
+            audio.refresh_devices()
 
         return channels, mic_mute
 
@@ -814,7 +815,27 @@ class MiniDeckWiFiBridge:
             self._last_esp_write_ts[target] = time.monotonic()
 
             if target == "master":
-                applied = audio.set_master_volume(val)
+                try:
+                    applied = audio.set_master_volume(val)
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao ajustar Master (%s). Recarregando dispositivos...",
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        applied = audio.set_master_volume(val)
+                        self.log.info(
+                            "[Audio Hot-Plug] Reconectado ao dispositivo padrão: %s",
+                            audio.get_master_device_name() or "N/A",
+                        )
+                    except (COMError, Exception) as retry_exc:
+                        self.log.warning(
+                            "[Audio Hot-Plug] Saída padrão temporariamente indisponível (%s).",
+                            retry_exc,
+                        )
+                        return
+
                 if "master" in self._last_channels:
                     self._last_channels["master"].volume = applied
                 self.log.info("[ESP32 WiFi -> Windows] Master volume = %d%%", applied)
@@ -822,7 +843,20 @@ class MiniDeckWiFiBridge:
 
             proc_name = self._resolved_processes.get(target)
             if proc_name:
-                ok = audio.set_app_volume(proc_name, val)
+                try:
+                    ok = audio.set_app_volume(proc_name, val)
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao ajustar volume de '%s' (%s). Recarregando dispositivos...",
+                        proc_name,
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        ok = audio.set_app_volume(proc_name, val)
+                    except (COMError, Exception):
+                        ok = False
+
                 if ok and target in self._last_channels:
                     self._last_channels[target].volume = val
                     self.log.info(
@@ -850,7 +884,27 @@ class MiniDeckWiFiBridge:
             self._last_esp_write_ts[target] = time.monotonic()
 
             if target == "master":
-                new_state = audio.toggle_master_mute()
+                try:
+                    new_state = audio.toggle_master_mute()
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao alternar mute Master (%s). Recarregando dispositivos...",
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        new_state = audio.toggle_master_mute()
+                        self.log.info(
+                            "[Audio Hot-Plug] Reconectado ao dispositivo padrão: %s",
+                            audio.get_master_device_name() or "N/A",
+                        )
+                    except (COMError, Exception) as retry_exc:
+                        self.log.warning(
+                            "[Audio Hot-Plug] Saída padrão temporariamente indisponível (%s).",
+                            retry_exc,
+                        )
+                        return
+
                 if "master" in self._last_channels:
                     self._last_channels["master"].muted = new_state
                 await self._send_json(ws, {"sync": "mute", "target": "master", "val": new_state})
@@ -861,10 +915,32 @@ class MiniDeckWiFiBridge:
                 return
 
             if target == "mic":
-                if not audio.has_microphone():
-                    self.log.warning("[ESP32 WiFi -> Windows] Nenhum microfone padrão detectado.")
-                    return
-                new_state = audio.toggle_mic_mute()
+                try:
+                    if not audio.has_microphone():
+                        self.log.warning("[ESP32 WiFi -> Windows] Nenhum microfone padrão detectado.")
+                        return
+                    new_state = audio.toggle_mic_mute()
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao alternar Microfone (%s). Recarregando dispositivos...",
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        if not audio.has_microphone():
+                            return
+                        new_state = audio.toggle_mic_mute()
+                        self.log.info(
+                            "[Audio Hot-Plug] Microfone reconectado: %s",
+                            audio.get_mic_device_name() or "N/A",
+                        )
+                    except (COMError, Exception) as retry_exc:
+                        self.log.warning(
+                            "[Audio Hot-Plug] Microfone temporariamente indisponível (%s).",
+                            retry_exc,
+                        )
+                        return
+
                 self._last_mic_mute = new_state
                 await self._send_json(ws, {"sync": "mute", "target": "mic", "val": new_state})
                 self.log.info(
@@ -875,7 +951,20 @@ class MiniDeckWiFiBridge:
 
             proc_name = self._resolved_processes.get(target)
             if proc_name:
-                new_state = audio.toggle_app_mute(proc_name)
+                try:
+                    new_state = audio.toggle_app_mute(proc_name)
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao alternar mute de '%s' (%s). Recarregando dispositivos...",
+                        proc_name,
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        new_state = audio.toggle_app_mute(proc_name)
+                    except (COMError, Exception):
+                        new_state = None
+
                 if new_state is not None:
                     if target in self._last_channels:
                         self._last_channels[target].muted = new_state

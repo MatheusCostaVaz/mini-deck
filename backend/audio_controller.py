@@ -81,7 +81,7 @@ class AudioController:
         """Recarrega os dispositivos padrão de saída (speakers) e entrada (microfone)."""
         try:
             self._speakers = AudioUtilities.GetSpeakers()
-        except (COMError, OSError):
+        except (COMError, OSError, Exception):
             self._speakers = None
 
         try:
@@ -89,8 +89,16 @@ class AudioController:
             self._microphone = (
                 AudioUtilities.CreateDevice(raw_mic) if raw_mic is not None else None
             )
-        except (COMError, OSError):
+        except (COMError, OSError, Exception):
             self._microphone = None
+
+    def _with_device_retry(self, op):
+        """Executa uma operação WASAPI com reconexão automática (hot-plug) em caso de falha."""
+        try:
+            return op()
+        except (COMError, OSError, RuntimeError, Exception):
+            self.refresh_devices()
+            return op()
 
     # ------------------------------------------------------------------
     # Volume Master (Saída padrão)
@@ -105,37 +113,59 @@ class AudioController:
 
     def get_master_device_name(self) -> Optional[str]:
         """Retorna o nome amigável do dispositivo de saída padrão."""
-        if self._speakers is None:
+        try:
+            if self._speakers is None:
+                self.refresh_devices()
+            return self._speakers.FriendlyName if self._speakers is not None else None
+        except (COMError, OSError, Exception):
             self.refresh_devices()
-        return self._speakers.FriendlyName if self._speakers is not None else None
+            return self._speakers.FriendlyName if self._speakers is not None else None
 
     def get_master_volume(self) -> int:
         """Retorna o Volume Master atual (0 a 100)."""
-        endpoint = self._require_speakers().EndpointVolume
-        return _clamp_volume(endpoint.GetMasterVolumeLevelScalar() * 100.0)
+        def _op() -> int:
+            endpoint = self._require_speakers().EndpointVolume
+            return _clamp_volume(endpoint.GetMasterVolumeLevelScalar() * 100.0)
+
+        return self._with_device_retry(_op)
 
     def set_master_volume(self, level: int | float) -> int:
         """Define o Volume Master (0 a 100) e retorna o valor aplicado."""
         clamped = _clamp_volume(level)
-        endpoint = self._require_speakers().EndpointVolume
-        endpoint.SetMasterVolumeLevelScalar(clamped / 100.0, None)
-        return clamped
+
+        def _op() -> int:
+            endpoint = self._require_speakers().EndpointVolume
+            endpoint.SetMasterVolumeLevelScalar(clamped / 100.0, None)
+            return clamped
+
+        return self._with_device_retry(_op)
 
     def get_master_mute(self) -> bool:
         """Retorna True se o áudio Master estiver mutado."""
-        endpoint = self._require_speakers().EndpointVolume
-        return bool(endpoint.GetMute())
+        def _op() -> bool:
+            endpoint = self._require_speakers().EndpointVolume
+            return bool(endpoint.GetMute())
+
+        return self._with_device_retry(_op)
 
     def set_master_mute(self, muted: bool) -> bool:
         """Define o estado de Mute Master e retorna o novo estado."""
-        endpoint = self._require_speakers().EndpointVolume
-        endpoint.SetMute(1 if muted else 0, None)
-        return bool(endpoint.GetMute())
+        def _op() -> bool:
+            endpoint = self._require_speakers().EndpointVolume
+            endpoint.SetMute(1 if muted else 0, None)
+            return bool(endpoint.GetMute())
+
+        return self._with_device_retry(_op)
 
     def toggle_master_mute(self) -> bool:
         """Alterna o estado de Mute Master e retorna o novo estado."""
-        current = self.get_master_mute()
-        return self.set_master_mute(not current)
+        def _op() -> bool:
+            endpoint = self._require_speakers().EndpointVolume
+            current = bool(endpoint.GetMute())
+            endpoint.SetMute(0 if current else 1, None)
+            return bool(endpoint.GetMute())
+
+        return self._with_device_retry(_op)
 
     # ------------------------------------------------------------------
     # Microfone padrão (Entrada de áudio)
@@ -156,37 +186,59 @@ class AudioController:
 
     def get_mic_device_name(self) -> Optional[str]:
         """Retorna o nome amigável do microfone padrão."""
-        if self._microphone is None:
+        try:
+            if self._microphone is None:
+                self.refresh_devices()
+            return self._microphone.FriendlyName if self._microphone is not None else None
+        except (COMError, OSError, Exception):
             self.refresh_devices()
-        return self._microphone.FriendlyName if self._microphone is not None else None
+            return self._microphone.FriendlyName if self._microphone is not None else None
 
     def get_mic_volume(self) -> int:
         """Retorna o nível de volume do microfone padrão (0 a 100)."""
-        endpoint = self._require_microphone().EndpointVolume
-        return _clamp_volume(endpoint.GetMasterVolumeLevelScalar() * 100.0)
+        def _op() -> int:
+            endpoint = self._require_microphone().EndpointVolume
+            return _clamp_volume(endpoint.GetMasterVolumeLevelScalar() * 100.0)
+
+        return self._with_device_retry(_op)
 
     def set_mic_volume(self, level: int | float) -> int:
         """Define o volume do microfone padrão (0 a 100) e retorna o valor aplicado."""
         clamped = _clamp_volume(level)
-        endpoint = self._require_microphone().EndpointVolume
-        endpoint.SetMasterVolumeLevelScalar(clamped / 100.0, None)
-        return clamped
+
+        def _op() -> int:
+            endpoint = self._require_microphone().EndpointVolume
+            endpoint.SetMasterVolumeLevelScalar(clamped / 100.0, None)
+            return clamped
+
+        return self._with_device_retry(_op)
 
     def get_mic_mute(self) -> bool:
         """Retorna True se o microfone padrão estiver mutado."""
-        endpoint = self._require_microphone().EndpointVolume
-        return bool(endpoint.GetMute())
+        def _op() -> bool:
+            endpoint = self._require_microphone().EndpointVolume
+            return bool(endpoint.GetMute())
+
+        return self._with_device_retry(_op)
 
     def set_mic_mute(self, muted: bool) -> bool:
         """Define o estado de Mute do microfone padrão e retorna o novo estado."""
-        endpoint = self._require_microphone().EndpointVolume
-        endpoint.SetMute(1 if muted else 0, None)
-        return bool(endpoint.GetMute())
+        def _op() -> bool:
+            endpoint = self._require_microphone().EndpointVolume
+            endpoint.SetMute(1 if muted else 0, None)
+            return bool(endpoint.GetMute())
+
+        return self._with_device_retry(_op)
 
     def toggle_mic_mute(self) -> bool:
         """Alterna o estado de Mute do microfone padrão e retorna o novo estado."""
-        current = self.get_mic_mute()
-        return self.set_mic_mute(not current)
+        def _op() -> bool:
+            endpoint = self._require_microphone().EndpointVolume
+            current = bool(endpoint.GetMute())
+            endpoint.SetMute(0 if current else 1, None)
+            return bool(endpoint.GetMute())
+
+        return self._with_device_retry(_op)
 
     # ------------------------------------------------------------------
     # Sessões de áudio por aplicativo
@@ -194,15 +246,24 @@ class AudioController:
 
     def _get_raw_app_sessions(self) -> list:
         """Obtém sessões brutas do Windows com processo válido e não expiradas."""
+        try:
+            all_sessions = AudioUtilities.GetAllSessions()
+        except (COMError, OSError, Exception):
+            self.refresh_devices()
+            try:
+                all_sessions = AudioUtilities.GetAllSessions()
+            except (COMError, OSError, Exception):
+                return []
+
         valid_sessions = []
-        for session in AudioUtilities.GetAllSessions():
+        for session in all_sessions:
             try:
                 if session.State == AudioSessionState.Expired:
                     continue
                 if session.Process is None:
                     continue
                 valid_sessions.append(session)
-            except (COMError, OSError):
+            except (COMError, OSError, Exception):
                 continue
         return valid_sessions
 
@@ -337,56 +398,103 @@ class AudioController:
 
         Retorna True se ao menos uma sessão correspondente foi atualizada.
         """
-        matches = self._find_matching_sessions(app_name)
-        if not matches:
-            return False
-
         scalar = _clamp_volume(level) / 100.0
-        updated = False
-        for session in matches:
-            try:
-                session.SimpleAudioVolume.SetMasterVolume(scalar, None)
-                updated = True
-            except (COMError, OSError):
-                continue
-        return updated
+
+        def _apply() -> bool:
+            matches = self._find_matching_sessions(app_name)
+            if not matches:
+                return False
+            updated = False
+            for session in matches:
+                try:
+                    session.SimpleAudioVolume.SetMasterVolume(scalar, None)
+                    updated = True
+                except (COMError, OSError, Exception):
+                    continue
+            return updated
+
+        try:
+            if _apply():
+                return True
+        except (COMError, OSError, Exception):
+            pass
+
+        self.refresh_devices()
+        try:
+            return _apply()
+        except (COMError, OSError, Exception):
+            return False
 
     def get_app_mute(self, app_name: str) -> Optional[bool]:
         """Retorna o estado de mute do aplicativo informado, ou None se não encontrado."""
-        matches = self._find_matching_sessions(app_name)
-        if not matches:
-            return None
+        def _read() -> Optional[bool]:
+            matches = self._find_matching_sessions(app_name)
+            if not matches:
+                return None
+            target_session = next(
+                (s for s in matches if s.State == AudioSessionState.Active),
+                matches[0],
+            )
+            return bool(target_session.SimpleAudioVolume.GetMute())
 
-        target_session = next(
-            (s for s in matches if s.State == AudioSessionState.Active),
-            matches[0],
-        )
-        return bool(target_session.SimpleAudioVolume.GetMute())
+        try:
+            return _read()
+        except (COMError, OSError, Exception):
+            self.refresh_devices()
+            try:
+                return _read()
+            except (COMError, OSError, Exception):
+                return None
 
     def set_app_mute(self, app_name: str, muted: bool) -> bool:
         """Define o estado de mute de todas as sessões de um aplicativo.
 
         Retorna True se ao menos uma sessão correspondente foi atualizada.
         """
-        matches = self._find_matching_sessions(app_name)
-        if not matches:
-            return False
-
         mute_flag = 1 if muted else 0
-        updated = False
-        for session in matches:
-            try:
-                session.SimpleAudioVolume.SetMute(mute_flag, None)
-                updated = True
-            except (COMError, OSError):
-                continue
-        return updated
+
+        def _apply() -> bool:
+            matches = self._find_matching_sessions(app_name)
+            if not matches:
+                return False
+            updated = False
+            for session in matches:
+                try:
+                    session.SimpleAudioVolume.SetMute(mute_flag, None)
+                    updated = True
+                except (COMError, OSError, Exception):
+                    continue
+            return updated
+
+        try:
+            if _apply():
+                return True
+        except (COMError, OSError, Exception):
+            pass
+
+        self.refresh_devices()
+        try:
+            return _apply()
+        except (COMError, OSError, Exception):
+            return False
 
     def toggle_app_mute(self, app_name: str) -> Optional[bool]:
         """Alterna o mute de um aplicativo e retorna o novo estado (ou None se não encontrado)."""
-        current = self.get_app_mute(app_name)
-        if current is None:
-            return None
-        new_state = not current
-        self.set_app_mute(app_name, new_state)
-        return new_state
+        try:
+            current = self.get_app_mute(app_name)
+            if current is None:
+                return None
+            new_state = not current
+            self.set_app_mute(app_name, new_state)
+            return new_state
+        except (COMError, OSError, Exception):
+            self.refresh_devices()
+            try:
+                current = self.get_app_mute(app_name)
+                if current is None:
+                    return None
+                new_state = not current
+                self.set_app_mute(app_name, new_state)
+                return new_state
+            except (COMError, OSError, Exception):
+                return None
