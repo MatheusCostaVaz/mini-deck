@@ -314,6 +314,13 @@ static void sendMacroAction(const char *action)
     broadcastOutgoingEvent(buf);
 }
 
+static void sendLaunchGame(const char *gameId)
+{
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"launch_game\",\"game\":\"%s\"}", gameId);
+    broadcastOutgoingEvent(buf);
+}
+
 // ============================================================================
 // Tratamento Compartilhado de Comandos JSON (WebSocket e Serial)
 // ============================================================================
@@ -774,7 +781,13 @@ void setup()
     g_indev_drv.read_cb = my_touch_read;
     lv_indev_drv_register(&g_indev_drv);
 
-    ui_init(sendVolumeEvent, sendMuteToggleEvent, sendMediaAction, sendScreenChange, sendMacroAction);
+    ui_init(
+        sendVolumeEvent,
+        sendMuteToggleEvent,
+        sendMediaAction,
+        sendScreenChange,
+        sendMacroAction,
+        sendLaunchGame);
     lv_timer_handler();
 
     initWifiAsync();

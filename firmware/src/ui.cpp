@@ -29,7 +29,7 @@ constexpr uint32_t HEX_OK           = 0x10B981;
 
 constexpr uint32_t SLIDER_THROTTLE_MS = 40;
 constexpr uint32_t TOAST_DURATION_MS  = 1600;
-constexpr int      NUM_SCREENS        = 5;
+constexpr int      NUM_SCREENS        = 7;
 
 struct ChannelUi {
     const char *target;
@@ -98,19 +98,25 @@ const HubCardDef g_hub_cards[6] = {
 // ============================================================================
 // Telas Principais e Widgets Persistentes
 // ============================================================================
-lv_obj_t *g_screens[NUM_SCREENS]      = {nullptr, nullptr, nullptr, nullptr, nullptr};
-lv_obj_t *g_header_clock[NUM_SCREENS] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+lv_obj_t *g_screens[NUM_SCREENS]      = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+lv_obj_t *g_header_clock[NUM_SCREENS] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 HeaderMicWidgets g_header_mic[NUM_SCREENS];
 
 // Badge de conexão no centro do Header da Home
 lv_obj_t *g_home_conn_badge = nullptr;
 lv_obj_t *g_home_conn_label = nullptr;
 
-// Sliders laterais esquerdos persistentes (Home/Hardware/Atalhos = Master, Mídia = Browser/Edge)
+// Cabeçalho dinâmico da tela screen_game_hud
+lv_obj_t *g_hud_header_icon  = nullptr;
+lv_obj_t *g_hud_header_title = nullptr;
+
+// Sliders laterais esquerdos persistentes (Home/Hardware/Atalhos/Jogos/HUD = Master, Mídia = Browser/Edge)
 SidebarWidgets g_home_sidebar;
 SidebarWidgets g_media_sidebar;
 SidebarWidgets g_hw_sidebar;
 SidebarWidgets g_macros_sidebar;
+SidebarWidgets g_games_sidebar;
+SidebarWidgets g_hud_sidebar;
 
 // Toast flutuante da Home
 lv_obj_t *g_home_toast       = nullptr;
@@ -145,27 +151,57 @@ lv_obj_t *g_hw_ram_pct_lbl   = nullptr;
 lv_obj_t *g_hw_ram_bar       = nullptr;
 lv_obj_t *g_hw_ram_gb_lbl    = nullptr;
 
-// Widgets do Módulo CS2 C4 (Card 6 em screen_macros)
-lv_obj_t *g_c4_btn      = nullptr;
-lv_obj_t *g_c4_accent   = nullptr;
-lv_obj_t *g_c4_icon_lbl = nullptr;
-lv_obj_t *g_c4_main_lbl = nullptr;
-lv_obj_t *g_c4_sub_lbl  = nullptr;
+// Widgets do Painel Game HUD (screen_game_hud)
+lv_obj_t *g_hud_cpu_accent   = nullptr;
+lv_obj_t *g_hud_cpu_pct_lbl  = nullptr;
+lv_obj_t *g_hud_cpu_temp_lbl = nullptr;
+lv_obj_t *g_hud_cpu_bar      = nullptr;
+
+lv_obj_t *g_hud_gpu_accent   = nullptr;
+lv_obj_t *g_hud_gpu_pct_lbl  = nullptr;
+lv_obj_t *g_hud_gpu_temp_lbl = nullptr;
+lv_obj_t *g_hud_gpu_bar      = nullptr;
+
+lv_obj_t *g_hud_ram_accent   = nullptr;
+lv_obj_t *g_hud_ram_pct_lbl  = nullptr;
+lv_obj_t *g_hud_ram_gb_lbl   = nullptr;
+lv_obj_t *g_hud_ram_bar      = nullptr;
+
+// Bloco Inferior do Game HUD: Modo CS2 (C4 Timer) vs Modo Genérico (Sessão/Disco/RAM)
+lv_obj_t *g_hud_cs2_panel    = nullptr;
+lv_obj_t *g_hud_c4_accent    = nullptr;
+lv_obj_t *g_hud_c4_icon_box  = nullptr;
+lv_obj_t *g_hud_c4_icon_lbl  = nullptr;
+lv_obj_t *g_hud_c4_title_lbl = nullptr;
+lv_obj_t *g_hud_c4_time_lbl  = nullptr;
+lv_obj_t *g_hud_c4_sub_lbl   = nullptr;
+lv_obj_t *g_hud_c4_bar       = nullptr;
+
+lv_obj_t *g_hud_gen_panel    = nullptr;
+lv_obj_t *g_hud_gen_accent   = nullptr;
+lv_obj_t *g_hud_gen_icon_box = nullptr;
+lv_obj_t *g_hud_gen_icon_lbl = nullptr;
+lv_obj_t *g_hud_gen_title    = nullptr;
+lv_obj_t *g_hud_gen_ram_lbl  = nullptr;
+lv_obj_t *g_hud_gen_disk_lbl = nullptr;
+lv_obj_t *g_hud_gen_disk_bar = nullptr;
 
 // Estado Global Compartilhado
 UiConnState g_conn_state = UI_CONN_WAITING;
 bool g_mic_muted         = false;
 bool g_media_playing     = false;
 bool g_wifi_connected    = false;
+bool g_hud_cs2_mode      = true;
 char g_wifi_ip[24]       = "";
 char g_last_clock[16]    = "--:--";
 bool g_syncing_from_pc   = false;
 
-UiVolumeCallback g_vol_cb    = nullptr;
-UiMuteCallback   g_mute_cb   = nullptr;
-UiMediaCallback  g_media_cb  = nullptr;
-UiScreenCallback g_screen_cb = nullptr;
-UiMacroCallback  g_macro_cb  = nullptr;
+UiVolumeCallback     g_vol_cb         = nullptr;
+UiMuteCallback       g_mute_cb        = nullptr;
+UiMediaCallback      g_media_cb       = nullptr;
+UiScreenCallback     g_screen_cb      = nullptr;
+UiMacroCallback      g_macro_cb       = nullptr;
+UiLaunchGameCallback g_launch_game_cb = nullptr;
 
 // ============================================================================
 // Helpers Gerais
@@ -256,10 +292,15 @@ void update_channel_visuals(ChannelUi &ch)
         update_sidebar_visuals(g_home_sidebar, ch, PH_ICN_VOL);
         update_sidebar_visuals(g_hw_sidebar, ch, PH_ICN_VOL);
         update_sidebar_visuals(g_macros_sidebar, ch, PH_ICN_VOL);
+        update_sidebar_visuals(g_games_sidebar, ch, PH_ICN_VOL);
     }
     else if (strcasecmp(ch.target, "browser") == 0)
     {
         update_sidebar_visuals(g_media_sidebar, ch, PH_ICN_BROWSER);
+    }
+    else if (strcasecmp(ch.target, "game") == 0)
+    {
+        update_sidebar_visuals(g_hud_sidebar, ch, PH_ICN_GAME);
     }
 }
 
@@ -397,7 +438,8 @@ void sidebar_slider_cb(lv_event_t *e)
     if (!sb) return;
 
     const bool is_browser = (sb == &g_media_sidebar);
-    ChannelUi &ch = is_browser ? g_channels[1] : g_channels[0];
+    const bool is_game    = (sb == &g_hud_sidebar);
+    ChannelUi &ch = is_browser ? g_channels[1] : (is_game ? g_channels[3] : g_channels[0]);
     const lv_event_code_t code = lv_event_get_code(e);
 
     if (code == LV_EVENT_PRESSED)
@@ -414,7 +456,7 @@ void sidebar_slider_cb(lv_event_t *e)
         {
             lv_slider_set_value(ch.slider, ch.value, LV_ANIM_OFF);
         }
-        if (!is_browser)
+        if (!is_browser && !is_game)
         {
             if (sb != &g_home_sidebar && g_home_sidebar.slider)
             {
@@ -427,6 +469,10 @@ void sidebar_slider_cb(lv_event_t *e)
             if (sb != &g_macros_sidebar && g_macros_sidebar.slider)
             {
                 lv_slider_set_value(g_macros_sidebar.slider, ch.value, LV_ANIM_OFF);
+            }
+            if (sb != &g_games_sidebar && g_games_sidebar.slider)
+            {
+                lv_slider_set_value(g_games_sidebar.slider, ch.value, LV_ANIM_OFF);
             }
         }
         g_syncing_from_pc = false;
@@ -448,7 +494,7 @@ void sidebar_slider_cb(lv_event_t *e)
 void sidebar_mute_tap_cb(lv_event_t *e)
 {
     const int ch_idx = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
-    if (ch_idx < 0 || ch_idx > 1 || g_syncing_from_pc) return;
+    if (ch_idx < 0 || ch_idx > 3 || g_syncing_from_pc) return;
 
     ChannelUi &ch = g_channels[ch_idx];
     ch.muted = !ch.muted;
@@ -492,12 +538,22 @@ void audio_slider_event_cb(lv_event_t *e)
             {
                 lv_slider_set_value(g_macros_sidebar.slider, ch->value, LV_ANIM_OFF);
             }
+            if (g_games_sidebar.slider)
+            {
+                lv_slider_set_value(g_games_sidebar.slider, ch->value, LV_ANIM_OFF);
+            }
             g_syncing_from_pc = false;
         }
         else if (strcasecmp(ch->target, "browser") == 0 && g_media_sidebar.slider)
         {
             g_syncing_from_pc = true;
             lv_slider_set_value(g_media_sidebar.slider, ch->value, LV_ANIM_OFF);
+            g_syncing_from_pc = false;
+        }
+        else if (strcasecmp(ch->target, "game") == 0 && g_hud_sidebar.slider)
+        {
+            g_syncing_from_pc = true;
+            lv_slider_set_value(g_hud_sidebar.slider, ch->value, LV_ANIM_OFF);
             g_syncing_from_pc = false;
         }
 
@@ -613,6 +669,112 @@ void macro_btn_cb(lv_event_t *e)
     }
 }
 
+struct GameCardDef {
+    const char *id;
+    const char *title;
+    const char *hud_title;
+    const char *subtitle;
+    const char *icon_utf8;
+    uint32_t accent_hex;
+    uint32_t press_bg_hex;
+    bool is_cs2;
+
+    GameCardDef(
+        const char *i,
+        const char *t,
+        const char *ht,
+        const char *sub,
+        const char *ic,
+        uint32_t acc,
+        uint32_t pbg,
+        bool cs2)
+        : id(i),
+          title(t),
+          hud_title(ht),
+          subtitle(sub),
+          icon_utf8(ic),
+          accent_hex(acc),
+          press_bg_hex(pbg),
+          is_cs2(cs2) {}
+};
+
+const GameCardDef g_game_cards[4] = {
+    GameCardDef("cs2",       "CS2",        "CS2",        "GSI C4 + HUD",  PH_ICN_CROSSHAIR, 0xF59E0B, 0x3B2308, true),
+    GameCardDef("pubg",      "PUBG",       "PUBG",       "BATTLEGROUNDS", PH_ICN_GAME,      0x38BDF8, 0x0A2A43, false),
+    GameCardDef("watchdogs", "WATCH DOGS", "WATCH DOGS", "GAME HUD",      PH_ICN_FIRE,      0xA855F7, 0x2E1065, false),
+    GameCardDef("custom",    "OUTROS",     "GAME HUD",   "BIBLIOTECA",    PH_ICN_APP,       0x34D399, 0x064E3B, false),
+};
+
+void configure_game_hud(const GameCardDef &game)
+{
+    g_hud_cs2_mode = game.is_cs2;
+
+    if (g_hud_header_icon)
+    {
+        lv_label_set_text(g_hud_header_icon, game.icon_utf8);
+        lv_obj_set_style_text_color(g_hud_header_icon, lv_color_hex(game.accent_hex), 0);
+    }
+    if (g_hud_header_title)
+    {
+        lv_label_set_text(g_hud_header_title, game.hud_title);
+    }
+
+    if (g_hud_cs2_panel && g_hud_gen_panel)
+    {
+        if (game.is_cs2)
+        {
+            lv_obj_clear_flag(g_hud_cs2_panel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(g_hud_gen_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(g_hud_cs2_panel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(g_hud_gen_panel, LV_OBJ_FLAG_HIDDEN);
+
+            if (g_hud_gen_accent)
+            {
+                lv_obj_set_style_bg_color(g_hud_gen_accent, lv_color_hex(game.accent_hex), 0);
+            }
+            if (g_hud_gen_icon_box)
+            {
+                lv_obj_set_style_bg_color(g_hud_gen_icon_box, lv_color_hex(game.press_bg_hex), 0);
+                lv_obj_set_style_border_color(g_hud_gen_icon_box, lv_color_hex(game.accent_hex), 0);
+            }
+            if (g_hud_gen_icon_lbl)
+            {
+                lv_label_set_text(g_hud_gen_icon_lbl, game.icon_utf8);
+                lv_obj_set_style_text_color(g_hud_gen_icon_lbl, lv_color_hex(game.accent_hex), 0);
+            }
+            if (g_hud_gen_title)
+            {
+                char sbuf[40];
+                snprintf(sbuf, sizeof(sbuf), "SESSÃO: %s", game.hud_title);
+                lv_label_set_text(g_hud_gen_title, sbuf);
+            }
+        }
+    }
+}
+
+void open_games_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_show_screen(UI_SCREEN_GAMES, true);
+}
+
+void game_card_click_cb(lv_event_t *e)
+{
+    const auto *game = static_cast<const GameCardDef *>(lv_event_get_user_data(e));
+    if (!game) return;
+
+    configure_game_hud(*game);
+    update_sidebar_visuals(g_hud_sidebar, g_channels[3], PH_ICN_GAME);
+    ui_show_screen(UI_SCREEN_GAME_HUD, true);
+    if (g_launch_game_cb)
+    {
+        g_launch_game_cb(game->id);
+    }
+}
+
 // ============================================================================
 // Header Universal Ergonomico (58px de altura, botões 48px úteis)
 //   [ HORA (x=12) ]  [ HOME (62x48) ]  --- CENTRO ---  [ MIC (90x48) ]
@@ -707,9 +869,10 @@ void build_universal_header(
     }
     else
     {
+        lv_obj_t *mod_ic = nullptr;
         if (center_icon_utf8 && center_icon_utf8[0] != '\0')
         {
-            lv_obj_t *mod_ic = lv_label_create(center_box);
+            mod_ic = lv_label_create(center_box);
             lv_label_set_text(mod_ic, center_icon_utf8);
             lv_obj_set_style_text_font(mod_ic, &phosphor_20, 0);
             lv_obj_set_style_text_color(mod_ic, lv_color_hex(center_accent_hex), 0);
@@ -719,6 +882,12 @@ void build_universal_header(
         lv_label_set_text(mod_title, center_title ? center_title : "");
         lv_obj_set_style_text_font(mod_title, &inter_bold_16, 0);
         lv_obj_set_style_text_color(mod_title, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+        if (screen_id == UI_SCREEN_GAME_HUD)
+        {
+            g_hud_header_icon = mod_ic;
+            g_hud_header_title = mod_title;
+        }
     }
 
     // 4. Extrema Direita (Fixo em TODAS as telas): Botão [ MIC ] em pílula ampla (90 x 48 px)
@@ -752,7 +921,8 @@ void build_volume_sidebar(
     lv_obj_t *scr,
     SidebarWidgets &sb,
     int channel_idx,
-    const char *icon_utf8)
+    const char *icon_utf8,
+    const char *tag_text = nullptr)
 {
     const ChannelUi &ch = g_channels[channel_idx];
 
@@ -777,7 +947,7 @@ void build_volume_sidebar(
 
     lv_obj_t *ic_btn = lv_btn_create(sidebar);
     lv_obj_remove_style_all(ic_btn);
-    lv_obj_set_size(ic_btn, 58, 28);
+    lv_obj_set_size(ic_btn, 58, 26);
     lv_obj_align(ic_btn, LV_ALIGN_TOP_MID, 0, 5);
     lv_obj_set_style_radius(ic_btn, 8, 0);
     lv_obj_set_style_bg_opa(ic_btn, LV_OPA_TRANSP, 0);
@@ -795,11 +965,21 @@ void build_volume_sidebar(
     lv_obj_set_style_text_color(sb.icon, lv_color_hex(ch.accent_hex), 0);
     lv_obj_center(sb.icon);
 
+    const bool has_tag = (tag_text != nullptr && tag_text[0] != '\0');
+    if (has_tag)
+    {
+        lv_obj_t *tag_lbl = lv_label_create(sidebar);
+        lv_label_set_text(tag_lbl, tag_text);
+        lv_obj_set_style_text_font(tag_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(tag_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+        lv_obj_align(tag_lbl, LV_ALIGN_TOP_MID, 0, 32);
+    }
+
     sb.slider = lv_slider_create(sidebar);
     lv_slider_set_range(sb.slider, 0, 100);
     lv_slider_set_value(sb.slider, ch.value, LV_ANIM_OFF);
-    lv_obj_set_size(sb.slider, 18, 156);
-    lv_obj_align(sb.slider, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_set_size(sb.slider, 18, has_tag ? 142 : 156);
+    lv_obj_align(sb.slider, LV_ALIGN_TOP_MID, 0, has_tag ? 54 : 42);
     lv_obj_set_ext_click_area(sb.slider, 22);
 
     lv_obj_set_style_bg_opa(sb.slider, LV_OPA_COVER, LV_PART_MAIN);
@@ -841,7 +1021,7 @@ void build_screen_home()
     lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
 
     build_universal_header(scr, UI_SCREEN_HOME, nullptr, nullptr, HEX_CYAN);
-    build_volume_sidebar(scr, g_home_sidebar, 0, PH_ICN_VOL);
+    build_volume_sidebar(scr, g_home_sidebar, 0, PH_ICN_VOL, "GERAL");
 
     // Grade 2x3 abaixo do header de 58px: x=84..474 (390px), y=68..314 (246px)
     constexpr int16_t GRID_X = 84;
@@ -1374,50 +1554,354 @@ void build_screen_macros()
         lv_obj_add_event_cb(btn, macro_btn_cb, LV_EVENT_CLICKED, const_cast<char *>(def.action));
     }
 
-    // Card 6 (col=2, row=1): Widget Especial CS2 C4 (GSI Timer Dinâmico)
-    const int16_t c4_x = GRID_X + 2 * (CARD_W + GAP_X);
-    const int16_t c4_y = GRID_Y + 1 * (CARD_H + GAP_Y);
+    // Card 6 (col=2, row=1): Botão Principal "JOGOS" -> abre screen_games
+    const int16_t games_x = GRID_X + 2 * (CARD_W + GAP_X);
+    const int16_t games_y = GRID_Y + 1 * (CARD_H + GAP_Y);
 
-    g_c4_btn = lv_btn_create(scr);
-    lv_obj_remove_style_all(g_c4_btn);
-    lv_obj_set_pos(g_c4_btn, c4_x, c4_y);
-    lv_obj_set_size(g_c4_btn, CARD_W, CARD_H);
-    lv_obj_clear_flag(g_c4_btn, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_radius(g_c4_btn, 16, 0);
-    lv_obj_set_style_bg_opa(g_c4_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(HEX_CARD), 0);
-    lv_obj_set_style_border_width(g_c4_btn, 1, 0);
-    lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(HEX_CARD_BORDER), 0);
-    lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(0x3B2308), LV_STATE_PRESSED);
-    lv_obj_set_style_border_width(g_c4_btn, 2, LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(HEX_WARN), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(g_c4_btn, macro_btn_cb, LV_EVENT_CLICKED, const_cast<char *>("cs2_c4"));
+    lv_obj_t *games_btn = lv_btn_create(scr);
+    lv_obj_remove_style_all(games_btn);
+    lv_obj_set_pos(games_btn, games_x, games_y);
+    lv_obj_set_size(games_btn, CARD_W, CARD_H);
+    lv_obj_clear_flag(games_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(games_btn, 16, 0);
+    lv_obj_set_style_bg_opa(games_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(games_btn, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(games_btn, 1, 0);
+    lv_obj_set_style_border_color(games_btn, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_set_style_bg_color(games_btn, lv_color_hex(0x064E3B), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(games_btn, 2, LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(games_btn, lv_color_hex(0x34D399), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(games_btn, open_games_btn_cb, LV_EVENT_CLICKED, nullptr);
 
-    g_c4_accent = lv_obj_create(g_c4_btn);
-    lv_obj_remove_style_all(g_c4_accent);
-    lv_obj_set_size(g_c4_accent, 42, 3);
-    lv_obj_set_style_radius(g_c4_accent, 2, 0);
-    lv_obj_set_style_bg_opa(g_c4_accent, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(g_c4_accent, lv_color_hex(HEX_WARN), 0);
-    lv_obj_align(g_c4_accent, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_t *games_accent = lv_obj_create(games_btn);
+    lv_obj_remove_style_all(games_accent);
+    lv_obj_set_size(games_accent, 42, 3);
+    lv_obj_set_style_radius(games_accent, 2, 0);
+    lv_obj_set_style_bg_opa(games_accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(games_accent, lv_color_hex(0x34D399), 0);
+    lv_obj_align(games_accent, LV_ALIGN_TOP_MID, 0, 0);
 
-    g_c4_icon_lbl = lv_label_create(g_c4_btn);
-    lv_label_set_text(g_c4_icon_lbl, PH_ICN_CROSSHAIR);
-    lv_obj_set_style_text_font(g_c4_icon_lbl, &phosphor_32, 0);
-    lv_obj_set_style_text_color(g_c4_icon_lbl, lv_color_hex(HEX_WARN), 0);
-    lv_obj_align(g_c4_icon_lbl, LV_ALIGN_TOP_MID, 0, 14);
+    lv_obj_t *games_ic = lv_label_create(games_btn);
+    lv_label_set_text(games_ic, PH_ICN_GAME);
+    lv_obj_set_style_text_font(games_ic, &phosphor_32, 0);
+    lv_obj_set_style_text_color(games_ic, lv_color_hex(0x34D399), 0);
+    lv_obj_align(games_ic, LV_ALIGN_CENTER, 0, -14);
 
-    g_c4_main_lbl = lv_label_create(g_c4_btn);
-    lv_label_set_text(g_c4_main_lbl, "CS2 C4");
-    lv_obj_set_style_text_font(g_c4_main_lbl, &inter_bold_16, 0);
-    lv_obj_set_style_text_color(g_c4_main_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
-    lv_obj_align(g_c4_main_lbl, LV_ALIGN_CENTER, 0, 16);
+    lv_obj_t *games_lbl = lv_label_create(games_btn);
+    lv_label_set_text(games_lbl, "JOGOS");
+    lv_obj_set_style_text_font(games_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(games_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+    lv_obj_align(games_lbl, LV_ALIGN_BOTTOM_MID, 0, -16);
+}
 
-    g_c4_sub_lbl = lv_label_create(g_c4_btn);
-    lv_label_set_text(g_c4_sub_lbl, "AGUARDANDO");
-    lv_obj_set_style_text_font(g_c4_sub_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(g_c4_sub_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
-    lv_obj_align(g_c4_sub_lbl, LV_ALIGN_BOTTOM_MID, 0, -10);
+// ============================================================================
+// Tela 6: screen_games (Menu de Seleção de Jogos — Grade 2x2 Grande)
+// ============================================================================
+void build_screen_games()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_GAMES] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_GAMES, PH_ICN_GAME, "SELECIONE O JOGO", 0x34D399);
+    build_volume_sidebar(scr, g_games_sidebar, 0, PH_ICN_VOL);
+
+    // Grade 2x2 grande: x=84..474 (390px), y=68..314 (246px) -> cards 190x118, gap 10px
+    constexpr int16_t GRID_X = 84;
+    constexpr int16_t GRID_Y = 68;
+    constexpr int16_t CARD_W = 190;
+    constexpr int16_t CARD_H = 118;
+    constexpr int16_t GAP_X  = 10;
+    constexpr int16_t GAP_Y  = 10;
+
+    for (int i = 0; i < 4; ++i)
+    {
+        const GameCardDef &game = g_game_cards[i];
+        const int col = i % 2;
+        const int row = i / 2;
+        const int16_t x = GRID_X + col * (CARD_W + GAP_X);
+        const int16_t y = GRID_Y + row * (CARD_H + GAP_Y);
+
+        lv_obj_t *btn = lv_btn_create(scr);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_pos(btn, x, y);
+        lv_obj_set_size(btn, CARD_W, CARD_H);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(btn, 16, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(game.press_bg_hex), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(btn, 2, LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(btn, lv_color_hex(game.accent_hex), LV_STATE_PRESSED);
+
+        lv_obj_t *accent = lv_obj_create(btn);
+        lv_obj_remove_style_all(accent);
+        lv_obj_set_size(accent, 52, 3);
+        lv_obj_set_style_radius(accent, 2, 0);
+        lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(accent, lv_color_hex(game.accent_hex), 0);
+        lv_obj_align(accent, LV_ALIGN_TOP_MID, 0, 0);
+
+        lv_obj_t *ic = lv_label_create(btn);
+        lv_label_set_text(ic, game.icon_utf8);
+        lv_obj_set_style_text_font(ic, &phosphor_32, 0);
+        lv_obj_set_style_text_color(ic, lv_color_hex(game.accent_hex), 0);
+        lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 16);
+
+        lv_obj_t *title = lv_label_create(btn);
+        lv_label_set_text(title, game.title);
+        lv_obj_set_style_text_font(title, &inter_bold_16, 0);
+        lv_obj_set_style_text_color(title, lv_color_hex(HEX_TEXT_MAIN), 0);
+        lv_obj_align(title, LV_ALIGN_CENTER, 0, 15);
+
+        lv_obj_t *sub = lv_label_create(btn);
+        lv_label_set_text(sub, game.subtitle);
+        lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(sub, lv_color_hex(HEX_TEXT_DIM), 0);
+        lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -11);
+
+        lv_obj_add_event_cb(
+            btn,
+            game_card_click_cb,
+            LV_EVENT_CLICKED,
+            const_cast<GameCardDef *>(&game));
+    }
+}
+
+// ============================================================================
+// Tela 7: screen_game_hud (Painel Unificado em Jogo — Hardware + CS2 C4/Status)
+// ============================================================================
+void build_screen_game_hud()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_GAME_HUD] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_GAME_HUD, PH_ICN_CROSSHAIR, "CS2", 0xF59E0B);
+    build_volume_sidebar(scr, g_hud_sidebar, 3, PH_ICN_GAME, "JOGO");
+
+    // ---- Bloco Superior (y=68..180, h=112): 3 Tiles de Hardware (CPU | GPU | RAM) ----
+    // 3 * 124 + 2 * 9 = 390 px (x=84, 217, 350)
+    auto create_hud_stat_tile = [&](
+        int16_t x,
+        const char *icon_txt,
+        const lv_font_t *icon_font,
+        const char *title_txt,
+        uint32_t accent_hex,
+        lv_obj_t *&out_accent,
+        lv_obj_t *&out_pct,
+        lv_obj_t *&out_sub,
+        const lv_font_t *sub_font,
+        lv_obj_t *&out_bar) {
+        lv_obj_t *tile = lv_obj_create(scr);
+        lv_obj_remove_style_all(tile);
+        lv_obj_set_pos(tile, x, 68);
+        lv_obj_set_size(tile, 124, 112);
+        lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(tile, 14, 0);
+        lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(tile, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(tile, 1, 0);
+        lv_obj_set_style_border_color(tile, lv_color_hex(HEX_CARD_BORDER), 0);
+
+        out_accent = lv_obj_create(tile);
+        lv_obj_remove_style_all(out_accent);
+        lv_obj_set_size(out_accent, 42, 3);
+        lv_obj_set_style_radius(out_accent, 2, 0);
+        lv_obj_set_style_bg_opa(out_accent, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(out_accent, lv_color_hex(accent_hex), 0);
+        lv_obj_align(out_accent, LV_ALIGN_TOP_MID, 0, 0);
+
+        lv_obj_t *ic = lv_label_create(tile);
+        lv_label_set_text(ic, icon_txt);
+        lv_obj_set_pos(ic, 12, 11);
+        lv_obj_set_style_text_font(ic, icon_font, 0);
+        lv_obj_set_style_text_color(ic, lv_color_hex(accent_hex), 0);
+
+        lv_obj_t *ttl = lv_label_create(tile);
+        lv_label_set_text(ttl, title_txt);
+        lv_obj_set_pos(ttl, 36, 13);
+        lv_obj_set_style_text_font(ttl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(ttl, lv_color_hex(HEX_TEXT_DIM), 0);
+
+        out_pct = lv_label_create(tile);
+        lv_label_set_text(out_pct, "--%");
+        lv_obj_set_style_text_font(out_pct, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(out_pct, lv_color_hex(accent_hex), 0);
+        lv_obj_align(out_pct, LV_ALIGN_TOP_MID, 0, 38);
+
+        out_sub = lv_label_create(tile);
+        lv_label_set_text(out_sub, "--");
+        lv_obj_set_style_text_font(out_sub, sub_font, 0);
+        lv_obj_set_style_text_color(out_sub, lv_color_hex(0xCBD5E1), 0);
+        lv_obj_align(out_sub, LV_ALIGN_TOP_MID, 0, 66);
+
+        out_bar = lv_bar_create(tile);
+        lv_bar_set_range(out_bar, 0, 100);
+        lv_bar_set_value(out_bar, 0, LV_ANIM_OFF);
+        lv_obj_set_size(out_bar, 100, 8);
+        lv_obj_align(out_bar, LV_ALIGN_BOTTOM_MID, 0, -10);
+        lv_obj_set_style_radius(out_bar, 4, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(out_bar, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(out_bar, lv_color_hex(HEX_TRACK), LV_PART_MAIN);
+        lv_obj_set_style_radius(out_bar, 4, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(out_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(out_bar, lv_color_hex(accent_hex), LV_PART_INDICATOR);
+        lv_obj_set_style_anim_time(out_bar, 250, 0);
+    };
+
+    create_hud_stat_tile(
+        84, PH_ICN_CPU, &phosphor_20, "CPU", 0x34D399,
+        g_hud_cpu_accent, g_hud_cpu_pct_lbl, g_hud_cpu_temp_lbl, &inter_bold_16, g_hud_cpu_bar);
+
+    create_hud_stat_tile(
+        217, PH_ICN_GPU, &phosphor_20, "GPU", 0xA78BFA,
+        g_hud_gpu_accent, g_hud_gpu_pct_lbl, g_hud_gpu_temp_lbl, &inter_bold_16, g_hud_gpu_bar);
+
+    create_hud_stat_tile(
+        350, LV_SYMBOL_SD_CARD, &lv_font_montserrat_18, "RAM", 0x38BDF8,
+        g_hud_ram_accent, g_hud_ram_pct_lbl, g_hud_ram_gb_lbl, &lv_font_montserrat_12, g_hud_ram_bar);
+
+    // ---- Bloco Inferior A (Modo CS2): Widget Ativo da C4 (x=84, y=190, w=390, h=124) ----
+    g_hud_cs2_panel = lv_obj_create(scr);
+    lv_obj_remove_style_all(g_hud_cs2_panel);
+    lv_obj_set_pos(g_hud_cs2_panel, 84, 190);
+    lv_obj_set_size(g_hud_cs2_panel, 390, 124);
+    lv_obj_clear_flag(g_hud_cs2_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(g_hud_cs2_panel, 16, 0);
+    lv_obj_set_style_bg_opa(g_hud_cs2_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_hud_cs2_panel, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(g_hud_cs2_panel, 1, 0);
+    lv_obj_set_style_border_color(g_hud_cs2_panel, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    g_hud_c4_accent = lv_obj_create(g_hud_cs2_panel);
+    lv_obj_remove_style_all(g_hud_c4_accent);
+    lv_obj_set_size(g_hud_c4_accent, 64, 3);
+    lv_obj_set_style_radius(g_hud_c4_accent, 2, 0);
+    lv_obj_set_style_bg_opa(g_hud_c4_accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_hud_c4_accent, lv_color_hex(HEX_WARN), 0);
+    lv_obj_align(g_hud_c4_accent, LV_ALIGN_TOP_MID, 0, 0);
+
+    g_hud_c4_icon_box = lv_obj_create(g_hud_cs2_panel);
+    lv_obj_remove_style_all(g_hud_c4_icon_box);
+    lv_obj_set_pos(g_hud_c4_icon_box, 16, 25);
+    lv_obj_set_size(g_hud_c4_icon_box, 74, 74);
+    lv_obj_set_style_radius(g_hud_c4_icon_box, 18, 0);
+    lv_obj_set_style_bg_opa(g_hud_c4_icon_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_hud_c4_icon_box, lv_color_hex(0x2A2012), 0);
+    lv_obj_set_style_border_width(g_hud_c4_icon_box, 2, 0);
+    lv_obj_set_style_border_color(g_hud_c4_icon_box, lv_color_hex(HEX_WARN), 0);
+
+    g_hud_c4_icon_lbl = lv_label_create(g_hud_c4_icon_box);
+    lv_label_set_text(g_hud_c4_icon_lbl, PH_ICN_CROSSHAIR);
+    lv_obj_set_style_text_font(g_hud_c4_icon_lbl, &phosphor_42, 0);
+    lv_obj_set_style_text_color(g_hud_c4_icon_lbl, lv_color_hex(HEX_WARN), 0);
+    lv_obj_center(g_hud_c4_icon_lbl);
+
+    g_hud_c4_title_lbl = lv_label_create(g_hud_cs2_panel);
+    lv_label_set_text(g_hud_c4_title_lbl, "CS2 C4 TIMER (GSI)");
+    lv_obj_set_pos(g_hud_c4_title_lbl, 106, 18);
+    lv_obj_set_style_text_font(g_hud_c4_title_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_hud_c4_title_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    g_hud_c4_time_lbl = lv_label_create(g_hud_cs2_panel);
+    lv_label_set_text(g_hud_c4_time_lbl, "--s");
+    lv_obj_set_style_text_font(g_hud_c4_time_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(g_hud_c4_time_lbl, lv_color_hex(HEX_WARN), 0);
+    lv_obj_align(g_hud_c4_time_lbl, LV_ALIGN_TOP_RIGHT, -18, 14);
+
+    g_hud_c4_sub_lbl = lv_label_create(g_hud_cs2_panel);
+    lv_label_set_text(g_hud_c4_sub_lbl, "Aguardando plant na partida...");
+    lv_obj_set_pos(g_hud_c4_sub_lbl, 106, 50);
+    lv_obj_set_style_text_font(g_hud_c4_sub_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_hud_c4_sub_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    g_hud_c4_bar = lv_bar_create(g_hud_cs2_panel);
+    lv_bar_set_range(g_hud_c4_bar, 0, 40);
+    lv_bar_set_value(g_hud_c4_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_pos(g_hud_c4_bar, 106, 82);
+    lv_obj_set_size(g_hud_c4_bar, 266, 18);
+    lv_obj_set_style_radius(g_hud_c4_bar, 9, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_hud_c4_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_hud_c4_bar, lv_color_hex(HEX_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_radius(g_hud_c4_bar, 9, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(g_hud_c4_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(g_hud_c4_bar, lv_color_hex(HEX_WARN), LV_PART_INDICATOR);
+    lv_obj_set_style_anim_time(g_hud_c4_bar, 200, 0);
+
+    // ---- Bloco Inferior B (Modo Genérico): Sessão Ativa + RAM & Disco C: (x=84, y=190, w=390, h=124) ----
+    g_hud_gen_panel = lv_obj_create(scr);
+    lv_obj_remove_style_all(g_hud_gen_panel);
+    lv_obj_set_pos(g_hud_gen_panel, 84, 190);
+    lv_obj_set_size(g_hud_gen_panel, 390, 124);
+    lv_obj_clear_flag(g_hud_gen_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(g_hud_gen_panel, 16, 0);
+    lv_obj_set_style_bg_opa(g_hud_gen_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_hud_gen_panel, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(g_hud_gen_panel, 1, 0);
+    lv_obj_set_style_border_color(g_hud_gen_panel, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_add_flag(g_hud_gen_panel, LV_OBJ_FLAG_HIDDEN);
+
+    g_hud_gen_accent = lv_obj_create(g_hud_gen_panel);
+    lv_obj_remove_style_all(g_hud_gen_accent);
+    lv_obj_set_size(g_hud_gen_accent, 64, 3);
+    lv_obj_set_style_radius(g_hud_gen_accent, 2, 0);
+    lv_obj_set_style_bg_opa(g_hud_gen_accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_hud_gen_accent, lv_color_hex(0x38BDF8), 0);
+    lv_obj_align(g_hud_gen_accent, LV_ALIGN_TOP_MID, 0, 0);
+
+    g_hud_gen_icon_box = lv_obj_create(g_hud_gen_panel);
+    lv_obj_remove_style_all(g_hud_gen_icon_box);
+    lv_obj_set_pos(g_hud_gen_icon_box, 16, 28);
+    lv_obj_set_size(g_hud_gen_icon_box, 68, 68);
+    lv_obj_set_style_radius(g_hud_gen_icon_box, 18, 0);
+    lv_obj_set_style_bg_opa(g_hud_gen_icon_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_hud_gen_icon_box, lv_color_hex(0x0A2A43), 0);
+    lv_obj_set_style_border_width(g_hud_gen_icon_box, 2, 0);
+    lv_obj_set_style_border_color(g_hud_gen_icon_box, lv_color_hex(0x38BDF8), 0);
+
+    g_hud_gen_icon_lbl = lv_label_create(g_hud_gen_icon_box);
+    lv_label_set_text(g_hud_gen_icon_lbl, PH_ICN_GAME);
+    lv_obj_set_style_text_font(g_hud_gen_icon_lbl, &phosphor_32, 0);
+    lv_obj_set_style_text_color(g_hud_gen_icon_lbl, lv_color_hex(0x38BDF8), 0);
+    lv_obj_center(g_hud_gen_icon_lbl);
+
+    g_hud_gen_title = lv_label_create(g_hud_gen_panel);
+    lv_label_set_text(g_hud_gen_title, "SESSÃO ATIVA");
+    lv_obj_set_pos(g_hud_gen_title, 100, 18);
+    lv_obj_set_style_text_font(g_hud_gen_title, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_hud_gen_title, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    g_hud_gen_ram_lbl = lv_label_create(g_hud_gen_panel);
+    lv_label_set_text(g_hud_gen_ram_lbl, "RAM: -- GB / -- GB");
+    lv_obj_set_pos(g_hud_gen_ram_lbl, 100, 48);
+    lv_obj_set_style_text_font(g_hud_gen_ram_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_hud_gen_ram_lbl, lv_color_hex(0xCBD5E1), 0);
+
+    g_hud_gen_disk_lbl = lv_label_create(g_hud_gen_panel);
+    lv_label_set_text(g_hud_gen_disk_lbl, "Disco C: --%");
+    lv_obj_set_pos(g_hud_gen_disk_lbl, 100, 74);
+    lv_obj_set_style_text_font(g_hud_gen_disk_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_hud_gen_disk_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    g_hud_gen_disk_bar = lv_bar_create(g_hud_gen_panel);
+    lv_bar_set_range(g_hud_gen_disk_bar, 0, 100);
+    lv_bar_set_value(g_hud_gen_disk_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_pos(g_hud_gen_disk_bar, 100, 94);
+    lv_obj_set_size(g_hud_gen_disk_bar, 272, 12);
+    lv_obj_set_style_radius(g_hud_gen_disk_bar, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_hud_gen_disk_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_hud_gen_disk_bar, lv_color_hex(HEX_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_radius(g_hud_gen_disk_bar, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(g_hud_gen_disk_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(g_hud_gen_disk_bar, lv_color_hex(0x34D399), LV_PART_INDICATOR);
+    lv_obj_set_style_anim_time(g_hud_gen_disk_bar, 250, 0);
 }
 
 void apply_home_conn_badge_style(UiConnState state)
@@ -1473,25 +1957,31 @@ void ui_init(
     UiMuteCallback on_mute_toggle,
     UiMediaCallback on_media_action,
     UiScreenCallback on_screen_change,
-    UiMacroCallback on_macro_action)
+    UiMacroCallback on_macro_action,
+    UiLaunchGameCallback on_launch_game)
 {
     g_vol_cb = on_volume_change;
     g_mute_cb = on_mute_toggle;
     g_media_cb = on_media_action;
     g_screen_cb = on_screen_change;
     g_macro_cb = on_macro_action;
+    g_launch_game_cb = on_launch_game;
 
     build_screen_home();
     build_screen_audio();
     build_screen_media();
     build_screen_hardware();
     build_screen_macros();
+    build_screen_games();
+    build_screen_game_hud();
 
     update_mic_visuals();
     update_sidebar_visuals(g_home_sidebar, g_channels[0], PH_ICN_VOL);
     update_sidebar_visuals(g_media_sidebar, g_channels[1], PH_ICN_BROWSER);
     update_sidebar_visuals(g_hw_sidebar, g_channels[0], PH_ICN_VOL);
     update_sidebar_visuals(g_macros_sidebar, g_channels[0], PH_ICN_VOL);
+    update_sidebar_visuals(g_games_sidebar, g_channels[0], PH_ICN_VOL);
+    update_sidebar_visuals(g_hud_sidebar, g_channels[3], PH_ICN_GAME);
     update_media_play_visuals();
     apply_home_conn_badge_style(UI_CONN_WAITING);
 
@@ -1521,6 +2011,8 @@ void ui_show_screen(UiScreenId screen_id, bool animate)
         else if (screen_id == UI_SCREEN_MEDIA) name = "media";
         else if (screen_id == UI_SCREEN_HARDWARE) name = "hardware";
         else if (screen_id == UI_SCREEN_MACROS) name = "macros";
+        else if (screen_id == UI_SCREEN_GAMES) name = "games";
+        else if (screen_id == UI_SCREEN_GAME_HUD) name = "game_hud";
         g_screen_cb(name);
     }
 }
@@ -1532,9 +2024,12 @@ void ui_sync_volume(const char *target, int value)
 
     const bool is_master  = (strcasecmp(ch->target, "master") == 0);
     const bool is_browser = (strcasecmp(ch->target, "browser") == 0);
+    const bool is_game    = (strcasecmp(ch->target, "game") == 0);
     if (ch->dragging ||
-        (is_master && (g_home_sidebar.dragging || g_hw_sidebar.dragging || g_macros_sidebar.dragging)) ||
-        (is_browser && g_media_sidebar.dragging))
+        (is_master && (g_home_sidebar.dragging || g_hw_sidebar.dragging ||
+                       g_macros_sidebar.dragging || g_games_sidebar.dragging)) ||
+        (is_browser && g_media_sidebar.dragging) ||
+        (is_game && g_hud_sidebar.dragging))
     {
         return;
     }
@@ -1562,10 +2057,18 @@ void ui_sync_volume(const char *target, int value)
         {
             lv_slider_set_value(g_macros_sidebar.slider, clamped, LV_ANIM_OFF);
         }
+        if (g_games_sidebar.slider)
+        {
+            lv_slider_set_value(g_games_sidebar.slider, clamped, LV_ANIM_OFF);
+        }
     }
     if (is_browser && g_media_sidebar.slider)
     {
         lv_slider_set_value(g_media_sidebar.slider, clamped, LV_ANIM_OFF);
+    }
+    if (is_game && g_hud_sidebar.slider)
+    {
+        lv_slider_set_value(g_hud_sidebar.slider, clamped, LV_ANIM_OFF);
     }
     update_channel_visuals(*ch);
     g_syncing_from_pc = false;
@@ -1769,84 +2272,220 @@ void ui_sync_stats(
         snprintf(gbuf, sizeof(gbuf), "%s GB / %s GB", ram_used, ram_total);
         lv_label_set_text(g_hw_ram_gb_lbl, gbuf);
     }
+
+    // ---- Atualiza também os 3 tiles + bloco genérico do Painel Game HUD ----
+    auto temp_color_for = [](int t) -> uint32_t {
+        if (t > 80) return 0xEF4444;
+        if (t >= 72) return HEX_WARN;
+        return 0xCBD5E1;
+    };
+
+    if (g_hud_cpu_pct_lbl)
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", cpu);
+        lv_label_set_text(g_hud_cpu_pct_lbl, buf);
+        lv_obj_set_style_text_color(g_hud_cpu_pct_lbl, lv_color_hex(cpu_color), 0);
+    }
+    if (g_hud_cpu_temp_lbl)
+    {
+        char tbuf[16];
+        if (cpu_temp > 0) snprintf(tbuf, sizeof(tbuf), "%d\xC2\xB0" "C", cpu_temp);
+        else snprintf(tbuf, sizeof(tbuf), "--");
+        lv_label_set_text(g_hud_cpu_temp_lbl, tbuf);
+        lv_obj_set_style_text_color(g_hud_cpu_temp_lbl, lv_color_hex(temp_color_for(cpu_temp)), 0);
+    }
+    if (g_hud_cpu_bar)
+    {
+        lv_bar_set_value(g_hud_cpu_bar, cpu, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(g_hud_cpu_bar, lv_color_hex(cpu_color), LV_PART_INDICATOR);
+    }
+    if (g_hud_cpu_accent)
+    {
+        lv_obj_set_style_bg_color(g_hud_cpu_accent, lv_color_hex(cpu_temp > 80 ? 0xEF4444 : cpu_color), 0);
+    }
+
+    if (g_hud_gpu_pct_lbl)
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", gpu);
+        lv_label_set_text(g_hud_gpu_pct_lbl, buf);
+        lv_obj_set_style_text_color(g_hud_gpu_pct_lbl, lv_color_hex(gpu_color), 0);
+    }
+    if (g_hud_gpu_temp_lbl)
+    {
+        char tbuf[16];
+        if (gpu_temp > 0) snprintf(tbuf, sizeof(tbuf), "%d\xC2\xB0" "C", gpu_temp);
+        else snprintf(tbuf, sizeof(tbuf), "--");
+        lv_label_set_text(g_hud_gpu_temp_lbl, tbuf);
+        lv_obj_set_style_text_color(g_hud_gpu_temp_lbl, lv_color_hex(temp_color_for(gpu_temp)), 0);
+    }
+    if (g_hud_gpu_bar)
+    {
+        lv_bar_set_value(g_hud_gpu_bar, gpu, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(g_hud_gpu_bar, lv_color_hex(gpu_color), LV_PART_INDICATOR);
+    }
+    if (g_hud_gpu_accent)
+    {
+        lv_obj_set_style_bg_color(g_hud_gpu_accent, lv_color_hex(gpu_temp > 80 ? 0xEF4444 : gpu_color), 0);
+    }
+
+    if (g_hud_ram_pct_lbl)
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", ram);
+        lv_label_set_text(g_hud_ram_pct_lbl, buf);
+        lv_obj_set_style_text_color(g_hud_ram_pct_lbl, lv_color_hex(ram_color), 0);
+    }
+    if (g_hud_ram_gb_lbl && ram_used && ram_total)
+    {
+        char sbuf[28];
+        snprintf(sbuf, sizeof(sbuf), "%s/%sG", ram_used, ram_total);
+        lv_label_set_text(g_hud_ram_gb_lbl, sbuf);
+    }
+    if (g_hud_ram_bar)
+    {
+        lv_bar_set_value(g_hud_ram_bar, ram, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(g_hud_ram_bar, lv_color_hex(ram_color), LV_PART_INDICATOR);
+    }
+    if (g_hud_ram_accent)
+    {
+        lv_obj_set_style_bg_color(g_hud_ram_accent, lv_color_hex(ram_color), 0);
+    }
+
+    if (g_hud_gen_ram_lbl && ram_used && ram_total)
+    {
+        char gbuf[48];
+        snprintf(gbuf, sizeof(gbuf), "RAM em uso: %s GB / %s GB (%d%%)", ram_used, ram_total, ram);
+        lv_label_set_text(g_hud_gen_ram_lbl, gbuf);
+    }
+    if (disk_pct >= 0)
+    {
+        const int d = clamp_vol(disk_pct);
+        if (g_hud_gen_disk_lbl)
+        {
+            char dbuf[28];
+            snprintf(dbuf, sizeof(dbuf), "Disco C: %d%% utilizado", d);
+            lv_label_set_text(g_hud_gen_disk_lbl, dbuf);
+        }
+        if (g_hud_gen_disk_bar)
+        {
+            const uint32_t dcol = (d >= 90) ? 0xEF4444 : (d >= 80 ? HEX_WARN : 0x34D399);
+            lv_bar_set_value(g_hud_gen_disk_bar, d, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(g_hud_gen_disk_bar, lv_color_hex(dcol), LV_PART_INDICATOR);
+        }
+    }
 }
 
 void ui_sync_cs2_c4(const char *state, int time_left)
 {
-    if (!g_c4_btn || !g_c4_icon_lbl || !g_c4_main_lbl || !g_c4_sub_lbl) return;
+    if (!g_hud_cs2_panel || !g_hud_c4_icon_lbl || !g_hud_c4_time_lbl || !g_hud_c4_sub_lbl) return;
 
     const bool planted = (state != nullptr && strcasecmp(state, "planted") == 0);
     if (!planted)
     {
-        lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(HEX_CARD), 0);
-        lv_obj_set_style_border_width(g_c4_btn, 1, 0);
-        lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(HEX_CARD_BORDER), 0);
-        if (g_c4_accent)
+        lv_obj_set_style_bg_color(g_hud_cs2_panel, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(g_hud_cs2_panel, 1, 0);
+        lv_obj_set_style_border_color(g_hud_cs2_panel, lv_color_hex(HEX_CARD_BORDER), 0);
+        if (g_hud_c4_accent)
         {
-            lv_obj_set_style_bg_color(g_c4_accent, lv_color_hex(HEX_WARN), 0);
+            lv_obj_set_style_bg_color(g_hud_c4_accent, lv_color_hex(HEX_WARN), 0);
         }
-        lv_label_set_text(g_c4_icon_lbl, PH_ICN_CROSSHAIR);
-        lv_obj_set_style_text_color(g_c4_icon_lbl, lv_color_hex(HEX_WARN), 0);
+        if (g_hud_c4_icon_box)
+        {
+            lv_obj_set_style_bg_color(g_hud_c4_icon_box, lv_color_hex(0x2A2012), 0);
+            lv_obj_set_style_border_color(g_hud_c4_icon_box, lv_color_hex(HEX_WARN), 0);
+        }
+        lv_label_set_text(g_hud_c4_icon_lbl, PH_ICN_CROSSHAIR);
+        lv_obj_set_style_text_color(g_hud_c4_icon_lbl, lv_color_hex(HEX_WARN), 0);
 
-        lv_label_set_text(g_c4_main_lbl, "CS2 C4");
-        lv_obj_set_style_text_font(g_c4_main_lbl, &inter_bold_16, 0);
-        lv_obj_set_style_text_color(g_c4_main_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
-        lv_obj_align(g_c4_main_lbl, LV_ALIGN_CENTER, 0, 16);
+        if (g_hud_c4_title_lbl)
+        {
+            lv_label_set_text(g_hud_c4_title_lbl, "CS2 C4 TIMER (GSI)");
+            lv_obj_set_style_text_color(g_hud_c4_title_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+        }
+        lv_label_set_text(g_hud_c4_time_lbl, "--s");
+        lv_obj_set_style_text_color(g_hud_c4_time_lbl, lv_color_hex(HEX_WARN), 0);
 
-        lv_label_set_text(g_c4_sub_lbl, "AGUARDANDO");
-        lv_obj_set_style_text_color(g_c4_sub_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+        lv_label_set_text(g_hud_c4_sub_lbl, "Aguardando plant na partida...");
+        lv_obj_set_style_text_color(g_hud_c4_sub_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+
+        if (g_hud_c4_bar)
+        {
+            lv_bar_set_value(g_hud_c4_bar, 0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(g_hud_c4_bar, lv_color_hex(HEX_WARN), LV_PART_INDICATOR);
+        }
         return;
     }
 
-    const int secs = (time_left < 0) ? 0 : time_left;
+    const int secs = (time_left < 0) ? 0 : (time_left > 40 ? 40 : time_left);
     uint32_t bg_hex = 0x3B2308;
+    uint32_t box_bg = 0x452A0A;
     uint32_t bdr_hex = HEX_WARN;
     uint32_t ic_hex = 0xFBBF24;
     uint32_t txt_hex = 0xFDE68A;
     const char *icon_utf8 = PH_ICN_FIRE;
-    const char *sub_txt = "C4 PLANTADA";
+    const char *title_txt = "BOMBA PLANTADA";
+    const char *sub_txt = "Tempo restante para desarme";
 
     if (secs <= 5)
     {
-        // Crítico (< 5s): impossível desarmar mesmo com kit
         bg_hex = 0x991B1B;
+        box_bg = 0x7F1D1D;
         bdr_hex = 0xFF4444;
         ic_hex = 0xFFFFFF;
         txt_hex = 0xFFFFFF;
         icon_utf8 = PH_ICN_WARNING;
-        sub_txt = "CORRE!";
+        title_txt = "CORRE! VAI EXPLODIR!";
+        sub_txt = "Menos de 5s (sem tempo com kit)";
     }
     else if (secs <= 10)
     {
-        // Alerta máximo (<= 10s): sem kit não dá mais tempo
         bg_hex = 0x450A0A;
+        box_bg = 0x5C1111;
         bdr_hex = 0xEF4444;
         ic_hex = 0xF87171;
         txt_hex = 0xFCA5A5;
         icon_utf8 = PH_ICN_WARNING;
-        sub_txt = "SEM KIT!";
+        title_txt = "ALERTA! SEM KIT!";
+        sub_txt = "Apenas com Defuse Kit (< 10s)";
     }
 
-    lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(bg_hex), 0);
-    lv_obj_set_style_border_width(g_c4_btn, 2, 0);
-    lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(bdr_hex), 0);
-    if (g_c4_accent)
+    lv_obj_set_style_bg_color(g_hud_cs2_panel, lv_color_hex(bg_hex), 0);
+    lv_obj_set_style_border_width(g_hud_cs2_panel, 2, 0);
+    lv_obj_set_style_border_color(g_hud_cs2_panel, lv_color_hex(bdr_hex), 0);
+    if (g_hud_c4_accent)
     {
-        lv_obj_set_style_bg_color(g_c4_accent, lv_color_hex(bdr_hex), 0);
+        lv_obj_set_style_bg_color(g_hud_c4_accent, lv_color_hex(bdr_hex), 0);
+    }
+    if (g_hud_c4_icon_box)
+    {
+        lv_obj_set_style_bg_color(g_hud_c4_icon_box, lv_color_hex(box_bg), 0);
+        lv_obj_set_style_border_color(g_hud_c4_icon_box, lv_color_hex(bdr_hex), 0);
     }
 
-    lv_label_set_text(g_c4_icon_lbl, icon_utf8);
-    lv_obj_set_style_text_color(g_c4_icon_lbl, lv_color_hex(ic_hex), 0);
+    lv_label_set_text(g_hud_c4_icon_lbl, icon_utf8);
+    lv_obj_set_style_text_color(g_hud_c4_icon_lbl, lv_color_hex(ic_hex), 0);
+
+    if (g_hud_c4_title_lbl)
+    {
+        lv_label_set_text(g_hud_c4_title_lbl, title_txt);
+        lv_obj_set_style_text_color(g_hud_c4_title_lbl, lv_color_hex(txt_hex), 0);
+    }
 
     char tbuf[16];
     snprintf(tbuf, sizeof(tbuf), "%ds", secs);
-    lv_label_set_text(g_c4_main_lbl, tbuf);
-    lv_obj_set_style_text_font(g_c4_main_lbl, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(g_c4_main_lbl, lv_color_hex(txt_hex), 0);
-    lv_obj_align(g_c4_main_lbl, LV_ALIGN_CENTER, 0, 15);
+    lv_label_set_text(g_hud_c4_time_lbl, tbuf);
+    lv_obj_set_style_text_color(g_hud_c4_time_lbl, lv_color_hex(txt_hex), 0);
 
-    lv_label_set_text(g_c4_sub_lbl, sub_txt);
-    lv_obj_set_style_text_color(g_c4_sub_lbl, lv_color_hex(txt_hex), 0);
+    lv_label_set_text(g_hud_c4_sub_lbl, sub_txt);
+    lv_obj_set_style_text_color(g_hud_c4_sub_lbl, lv_color_hex(txt_hex), 0);
+
+    if (g_hud_c4_bar)
+    {
+        lv_bar_set_value(g_hud_c4_bar, secs, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(g_hud_c4_bar, lv_color_hex(bdr_hex), LV_PART_INDICATOR);
+    }
 }
 
 void ui_set_conn_state(UiConnState state)

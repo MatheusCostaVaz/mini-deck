@@ -50,21 +50,25 @@ enum UiScreenId : uint8_t {
     UI_SCREEN_MEDIA = 2,
     UI_SCREEN_HARDWARE = 3,
     UI_SCREEN_MACROS = 4,
+    UI_SCREEN_GAMES = 5,
+    UI_SCREEN_GAME_HUD = 6,
 };
 
-using UiVolumeCallback = void (*)(const char *target, int value);
-using UiMuteCallback   = void (*)(const char *target);
-using UiMediaCallback  = void (*)(const char *action);
-using UiScreenCallback = void (*)(const char *screen_name);
-using UiMacroCallback  = void (*)(const char *action);
+using UiVolumeCallback     = void (*)(const char *target, int value);
+using UiMuteCallback       = void (*)(const char *target);
+using UiMediaCallback      = void (*)(const char *action);
+using UiScreenCallback     = void (*)(const char *screen_name);
+using UiMacroCallback      = void (*)(const char *action);
+using UiLaunchGameCallback = void (*)(const char *game_id);
 
-// Inicializa arquitetura multi-screen LVGL (Home, Mixer, Mídia, Hardware, Atalhos)
+// Inicializa arquitetura multi-screen LVGL (Home, Mixer, Mídia, Hardware, Atalhos, Jogos, Game HUD)
 void ui_init(
     UiVolumeCallback on_volume_change,
     UiMuteCallback on_mute_toggle,
     UiMediaCallback on_media_action = nullptr,
     UiScreenCallback on_screen_change = nullptr,
-    UiMacroCallback on_macro_action = nullptr);
+    UiMacroCallback on_macro_action = nullptr,
+    UiLaunchGameCallback on_launch_game = nullptr);
 
 // Navegação entre telas
 void ui_show_screen(UiScreenId screen_id, bool animate = true);

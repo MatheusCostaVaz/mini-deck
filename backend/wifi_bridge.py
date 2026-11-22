@@ -55,6 +55,27 @@ CHAT_CANDIDATES = (
     "telegram.exe",
 )
 
+KNOWN_GAME_CANDIDATES = (
+    "cs2.exe",
+    "tslgame.exe",
+    "watchdogs.exe",
+    "watchdogs2.exe",
+    "watchdogslegion.exe",
+    "wardogsclient-win64-shipping.exe",
+    "wardogs.exe",
+)
+
+LAUNCHER_FALLBACK_PROCESSES = {
+    "steam.exe",
+    "steamwebhelper.exe",
+    "epicgameslauncher.exe",
+    "upc.exe",
+    "ubisoftconnect.exe",
+    "battle.net.exe",
+    "eadesktop.exe",
+    "spotify.exe",
+}
+
 IGNORED_UTILITY_PROCESSES = {
     "nvidia rtx voice.exe",
     "nvcontainer.exe",
@@ -78,6 +99,13 @@ FRIENDLY_LABELS = {
     "zoom.exe": "ZOOM",
     "slack.exe": "SLACK",
     "telegram.exe": "TELEGRAM",
+    "cs2.exe": "CS2",
+    "tslgame.exe": "PUBG",
+    "watchdogs.exe": "WATCHDOGS",
+    "watchdogs2.exe": "WATCHDOGS",
+    "watchdogslegion.exe": "WATCHDOGS",
+    "wardogsclient-win64-shipping.exe": "WARDOGS",
+    "wardogs.exe": "WARDOGS",
     "steam.exe": "STEAM",
     "spotify.exe": "SPOTIFY",
 }
@@ -776,7 +804,24 @@ class MiniDeckWiFiBridge:
             | IGNORED_UTILITY_PROCESSES
         )
         candidates = [s for s in sessions if s.process_name.lower() not in excluded]
-        return candidates[0] if candidates else None
+        if not candidates:
+            return None
+
+        # 1. Prioridade máxima: jogos conhecidos (cs2.exe, TslGame.exe, WatchDogs*.exe, WARDOGS)
+        known = self._pick_session(candidates, KNOWN_GAME_CANDIDATES)
+        if known is not None:
+            return known
+
+        # 2. Qualquer outro jogo/aplicativo fora dos launchers (Steam/Epic/Ubisoft)
+        non_launchers = [
+            s for s in candidates if s.process_name.lower() not in LAUNCHER_FALLBACK_PROCESSES
+        ]
+        if non_launchers:
+            active_game = next((s for s in non_launchers if s.is_active), None)
+            return active_game if active_game is not None else non_launchers[0]
+
+        # 3. Fallback: launcher (ex.: steam.exe) caso nenhum jogo esteja aberto
+        return candidates[0]
 
     def _read_windows_state(
         self, audio: AudioController
@@ -942,6 +987,16 @@ class MiniDeckWiFiBridge:
         await self._send_json(ws, {"sync": "mute", "target": "browser", "val": snap.muted})
         self._last_channels["browser"] = snap
 
+    async def _sync_game_channel(self, ws, audio: AudioController) -> None:
+        channels, _ = self._read_windows_state(audio)
+        snap = channels.get("game")
+        if snap is None:
+            return
+        await self._send_json(ws, {"sync": "label", "target": "game", "val": snap.label})
+        await self._send_json(ws, {"sync": "vol", "target": "game", "val": snap.volume})
+        await self._send_json(ws, {"sync": "mute", "target": "game", "val": snap.muted})
+        self._last_channels["game"] = snap
+
     async def _sync_media_to_esp32(
         self,
         ws,
@@ -1075,6 +1130,70 @@ class MiniDeckWiFiBridge:
         if action == "cs2_c4":
             return True
         return False
+
+    @staticmethod
+    def _find_running_process(process_names: tuple[str, ...]) -> Optional[str]:
+        """Verifica via psutil se algum dos processos informados já está em execução."""
+        targets = {p.lower() for p in process_names}
+        for proc in psutil.process_iter(["name"]):
+            try:
+                name = proc.info.get("name")
+                if name and name.lower() in targets:
+                    return name
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return None
+
+    def _launch_game(self, game: str) -> tuple[bool, str, bool]:
+        """Inicia o jogo selecionado pelo Hub de Jogos apenas se não estiver em execução.
+
+        Retorna (ok, descricao, already_running).
+        """
+        game_id = game.strip().lower()
+        process_map: dict[str, tuple[str, ...]] = {
+            "cs2": ("cs2.exe",),
+            "pubg": ("tslgame.exe",),
+            "watchdogs": (
+                "watchdogs.exe",
+                "watchdogs2.exe",
+                "watchdogslegion.exe",
+                "wardogsclient-win64-shipping.exe",
+                "wardogs.exe",
+            ),
+        }
+
+        if game_id in process_map:
+            running = self._find_running_process(process_map[game_id])
+            if running:
+                return True, f"{running} já em execução", True
+
+        if game_id == "cs2":
+            return self._launch_windows_target("steam://rungameid/730"), "Counter-Strike 2 (Steam 730)", False
+        if game_id == "pubg":
+            return self._launch_windows_target("steam://rungameid/578080"), "PUBG: BATTLEGROUNDS (Steam 578080)", False
+        if game_id == "watchdogs":
+            # Procura primeiro por atalho Watch Dogs no Desktop; depois WARDOGS (Steam 1867240) ou Ubisoft Connect
+            desktop_dirs = [
+                Path(os.environ.get("USERPROFILE", "")) / "Desktop",
+                Path(os.environ.get("PUBLIC", "C:\\Users\\Public")) / "Desktop",
+            ]
+            for d in desktop_dirs:
+                if not d.exists():
+                    continue
+                for entry in d.iterdir():
+                    low = entry.name.lower()
+                    if low.endswith((".lnk", ".url")) and ("watch dogs" in low or "watch_dogs" in low):
+                        return self._launch_windows_target(str(entry)), entry.name, False
+            # Fallback para WARDOGS instalado via Steam (AppID 1867240) ou Ubisoft Connect
+            steam_wardogs = Path("C:/Program Files (x86)/Steam/steamapps/appmanifest_1867240.acf")
+            if steam_wardogs.exists():
+                return self._launch_windows_target("steam://rungameid/1867240"), "WARDOGS (Steam 1867240)", False
+            if self._launch_windows_target("uplay://"):
+                return True, "Ubisoft Connect", False
+            return self._launch_windows_target("steam://open/games"), "Steam Biblioteca", False
+        if game_id == "custom":
+            return self._launch_windows_target("steam://open/games"), "Steam Biblioteca (Outros)", False
+        return False, game_id, False
 
     async def _sync_cs2_c4_to_esp32(self, ws=None) -> None:
         target_ws = ws if ws is not None else self._active_ws
@@ -1339,6 +1458,29 @@ class MiniDeckWiFiBridge:
                 await self._sync_cs2_c4_to_esp32(ws)
             return
 
+        if cmd == "launch_game":
+            game = str(msg.get("game", "")).lower()
+            ok, label, already_running = self._launch_game(game)
+            if already_running:
+                self.log.info(
+                    "[ESP32 WiFi -> Windows] Hub de Jogos '%s': %s -> sincronizando HUD/volume sem reabrir.",
+                    game,
+                    label,
+                )
+            else:
+                self.log.info(
+                    "[ESP32 WiFi -> Windows] Hub de Jogos '%s' (%s) -> %s",
+                    game,
+                    label,
+                    "OK" if ok else "FALHA",
+                )
+            if game == "cs2":
+                await self._start_cs2_gsi_server()
+                await self._sync_cs2_c4_to_esp32(ws)
+            await self._sync_game_channel(ws, audio)
+            await self._sync_stats_to_esp32(ws, log_once=False)
+            return
+
         if event == "screen":
             screen = str(msg.get("screen", "")).lower()
             if screen == "media":
@@ -1348,9 +1490,13 @@ class MiniDeckWiFiBridge:
             elif screen == "hardware":
                 self.log.info("[ESP32 WiFi] Tela Hardware aberta -> enviando telemetria CPU/RAM/GPU...")
                 await self._sync_stats_to_esp32(ws, log_once=False)
-            elif screen == "macros":
-                self.log.info("[ESP32 WiFi] Tela Atalhos aberta -> sincronizando estado CS2 C4...")
+            elif screen == "game_hud":
+                self.log.info("[ESP32 WiFi] Game HUD aberto -> sincronizando Volume do Jogo, Hardware e CS2 C4...")
+                await self._sync_game_channel(ws, audio)
+                await self._sync_stats_to_esp32(ws, log_once=False)
                 await self._sync_cs2_c4_to_esp32(ws)
+            elif screen == "macros":
+                self.log.info("[ESP32 WiFi] Tela Atalhos aberta.")
             return
 
         if event == "pong":
@@ -1400,6 +1546,10 @@ class MiniDeckWiFiBridge:
                 return
 
             proc_name = self._resolved_processes.get(target)
+            if not proc_name and target == "game":
+                self._read_windows_state(audio)
+                proc_name = self._resolved_processes.get(target)
+
             if proc_name:
                 try:
                     ok = audio.set_app_volume(proc_name, val)
@@ -1414,6 +1564,17 @@ class MiniDeckWiFiBridge:
                         ok = audio.set_app_volume(proc_name, val)
                     except (COMError, Exception):
                         ok = False
+
+                if not ok and target == "game":
+                    # Jogo pode ter acabado de abrir/trocar de processo -> reescaneia sessões
+                    self._read_windows_state(audio)
+                    new_proc = self._resolved_processes.get(target)
+                    if new_proc and new_proc != proc_name:
+                        proc_name = new_proc
+                        try:
+                            ok = audio.set_app_volume(proc_name, val)
+                        except (COMError, Exception):
+                            ok = False
 
                 if ok and target in self._last_channels:
                     self._last_channels[target].volume = val
