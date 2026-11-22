@@ -307,6 +307,13 @@ static void sendScreenChange(const char *screenName)
     broadcastOutgoingEvent(buf);
 }
 
+static void sendMacroAction(const char *action)
+{
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"macro\",\"action\":\"%s\"}", action);
+    broadcastOutgoingEvent(buf);
+}
+
 // ============================================================================
 // Tratamento Compartilhado de Comandos JSON (WebSocket e Serial)
 // ============================================================================
@@ -460,6 +467,13 @@ static void handleIncomingMessage(String line, bool fromWifi, uint8_t wsClientNu
         const char *ramTotal = doc["ram_total"] | "0.0";
         const int diskPct = doc["disk_pct"] | -1;
         ui_sync_stats(cpu, gpu, ramPct, ramUsed, ramTotal, diskPct);
+        validMessage = true;
+    }
+    else if (strcmp(syncType, "cs2_c4") == 0)
+    {
+        const char *state = doc["state"] | "idle";
+        const int timeLeft = doc["time_left"] | 0;
+        ui_sync_cs2_c4(state, timeLeft);
         validMessage = true;
     }
 
@@ -623,6 +637,7 @@ static void initWifiAsync()
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.setSleep(false);
 
     configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
     g_last_wifi_retry_ms = millis();
@@ -642,6 +657,7 @@ static void pollWifiAndClock()
         if (isConnected && !g_wifi_connected)
         {
             g_wifi_connected = true;
+            WiFi.setSleep(false);
             const String ipStr = WiFi.localIP().toString();
             ui_set_wifi_status(true, ipStr.c_str());
 
@@ -756,7 +772,7 @@ void setup()
     g_indev_drv.read_cb = my_touch_read;
     lv_indev_drv_register(&g_indev_drv);
 
-    ui_init(sendVolumeEvent, sendMuteToggleEvent, sendMediaAction, sendScreenChange);
+    ui_init(sendVolumeEvent, sendMuteToggleEvent, sendMediaAction, sendScreenChange, sendMacroAction);
     lv_timer_handler();
 
     initWifiAsync();

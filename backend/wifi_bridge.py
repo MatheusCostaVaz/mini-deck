@@ -22,8 +22,10 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import subprocess
 import sys
 import time
+import webbrowser
 from dataclasses import dataclass
 from typing import Optional
 
@@ -82,6 +84,8 @@ FRIENDLY_LABELS = {
 
 DEFAULT_UDP_PORT = 4210
 DEFAULT_WS_PORT = 81
+DEFAULT_CS2_GSI_PORT = 3000
+CS2_C4_TOTAL_SECONDS = 40
 POLL_INTERVAL_S = 0.25
 STATS_POLL_TICKS = 6  # 6 * 0.25s = 1.5s
 APP_PING_INTERVAL_S = 2.0
@@ -438,12 +442,14 @@ class MiniDeckWiFiBridge:
         udp_port: int = DEFAULT_UDP_PORT,
         fixed_host: Optional[str] = None,
         fixed_port: int = DEFAULT_WS_PORT,
+        gsi_port: int = DEFAULT_CS2_GSI_PORT,
         verbose: bool = False,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.udp_port = udp_port
         self.fixed_host = fixed_host
         self.fixed_port = fixed_port
+        self.gsi_port = gsi_port
         self.verbose = verbose
         self.log = logger or _setup_logger(verbose)
 
@@ -457,6 +463,14 @@ class MiniDeckWiFiBridge:
             "discord": None,
             "game": None,
         }
+        # Estado do servidor local CS2 GSI (C4 Timer)
+        self._active_ws = None
+        self._gsi_server: Optional[asyncio.AbstractServer] = None
+        self._c4_state: str = "idle"
+        self._c4_time_left: int = 0
+        self._c4_deadline: Optional[float] = None
+        self._c4_task: Optional[asyncio.Task] = None
+
         # Inicializa o contador não-bloqueante de CPU do psutil e leitor de GPU
         psutil.cpu_percent(interval=None)
         self._gpu = GpuMonitor(self.log)
@@ -764,6 +778,290 @@ class MiniDeckWiFiBridge:
             )
 
     # ------------------------------------------------------------------
+    # Macros / Atalhos de Aplicativos e Servidor CS2 GSI (C4 Timer)
+    # ------------------------------------------------------------------
+
+    def _launch_windows_target(self, target: str) -> bool:
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(target)
+                return True
+        except OSError:
+            pass
+        try:
+            creationflags = 0x08000000 if os.name == "nt" else 0
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", target],
+                creationflags=creationflags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except OSError:
+            return False
+
+    def _execute_macro(self, action: str) -> bool:
+        action = action.strip().lower()
+        if action == "edge":
+            return self._launch_windows_target("msedge")
+        if action == "steam":
+            return self._launch_windows_target("steam://open/main")
+        if action == "discord":
+            if self._launch_windows_target("discord://"):
+                return True
+            local_app = os.environ.get("LOCALAPPDATA", "")
+            updater = Path(local_app) / "Discord" / "Update.exe"
+            if updater.exists():
+                try:
+                    creationflags = 0x08000000 if os.name == "nt" else 0
+                    subprocess.Popen(
+                        [str(updater), "--processStart", "Discord.exe"],
+                        creationflags=creationflags,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return True
+                except OSError:
+                    return False
+            return False
+        if action == "disney":
+            return bool(webbrowser.open("https://www.disneyplus.com"))
+        if action == "hbo":
+            return bool(webbrowser.open("https://www.max.com"))
+        if action == "cs2_c4":
+            return True
+        return False
+
+    async def _sync_cs2_c4_to_esp32(self, ws=None) -> None:
+        target_ws = ws if ws is not None else self._active_ws
+        if target_ws is None:
+            return
+        payload = {
+            "sync": "cs2_c4",
+            "state": self._c4_state,
+            "time_left": self._c4_time_left if self._c4_state == "planted" else 0,
+        }
+        try:
+            await self._send_json(target_ws, payload)
+        except (WebSocketException, OSError):
+            pass
+
+    @staticmethod
+    def _enable_tcp_nodelay(transport) -> bool:
+        if transport is None:
+            return False
+        try:
+            sock = transport.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                return True
+        except OSError:
+            pass
+        return False
+
+    async def _cs2_c4_countdown_loop(self, skip_initial_send: bool = False) -> None:
+        try:
+            first_tick = True
+            while self._c4_state == "planted" and self._c4_deadline is not None:
+                remaining = int(round(max(0.0, self._c4_deadline - time.monotonic())))
+                self._c4_time_left = remaining
+                if not (first_tick and skip_initial_send):
+                    await self._sync_cs2_c4_to_esp32()
+                first_tick = False
+                if remaining <= 0:
+                    break
+                # Sincroniza o próximo tick exatamente no próximo segundo inteiro
+                next_target = self._c4_deadline - (remaining - 1)
+                sleep_s = max(0.05, min(1.0, next_target - time.monotonic()))
+                await asyncio.sleep(sleep_s)
+        except asyncio.CancelledError:
+            return
+
+        if self._c4_state == "planted":
+            self._c4_state = "idle"
+            self._c4_time_left = 0
+            self._c4_deadline = None
+            self.log.info("[CS2 GSI] Contagem da C4 finalizada -> idle.")
+            await self._sync_cs2_c4_to_esp32()
+
+    async def _start_cs2_c4_timer(self, initial_seconds: float = CS2_C4_TOTAL_SECONDS) -> None:
+        clamped = max(1.0, min(60.0, float(initial_seconds)))
+        if self._c4_state == "planted" and self._c4_task and not self._c4_task.done():
+            return
+        self._c4_state = "planted"
+        self._c4_deadline = time.monotonic() + clamped
+        self._c4_time_left = int(round(clamped))
+        self.log.info("[CS2 GSI] BOMBA PLANTADA! Iniciando contador regressivo (%ds).", self._c4_time_left)
+        # Dispara imediatamente o primeiro frame via WebSocket na mesma corrotina (zero atraso)
+        await self._sync_cs2_c4_to_esp32()
+        if self._c4_task and not self._c4_task.done():
+            self._c4_task.cancel()
+        self._c4_task = asyncio.create_task(self._cs2_c4_countdown_loop(skip_initial_send=True))
+
+    async def _stop_cs2_c4_timer(self, reason: str) -> None:
+        was_active = self._c4_state != "idle" or (self._c4_task is not None and not self._c4_task.done())
+        if self._c4_task and not self._c4_task.done():
+            self._c4_task.cancel()
+        self._c4_task = None
+        self._c4_state = "idle"
+        self._c4_time_left = 0
+        self._c4_deadline = None
+        if was_active:
+            self.log.info("[CS2 GSI] C4 encerrada (%s) -> idle.", reason)
+            await self._sync_cs2_c4_to_esp32()
+
+    async def _handle_cs2_gsi_payload(self, payload: dict) -> None:
+        round_info = payload.get("round")
+        bomb_info = payload.get("bomb")
+        round_bomb = ""
+        round_phase = ""
+        bomb_state = ""
+
+        if isinstance(round_info, dict):
+            round_bomb = str(round_info.get("bomb", "")).strip().lower()
+            round_phase = str(round_info.get("phase", "")).strip().lower()
+
+        if isinstance(bomb_info, dict):
+            bomb_state = str(bomb_info.get("state", "")).strip().lower()
+
+        self.log.info(
+            "[CS2 GSI] Payload recebido do CS2: bomb_state=%s | round_bomb=%s | round_phase=%s",
+            bomb_state or "-",
+            round_bomb or "-",
+            round_phase or "-",
+        )
+
+        if bomb_state in ("defused", "exploded") or round_bomb in ("defused", "exploded"):
+            reason = bomb_state if bomb_state in ("defused", "exploded") else round_bomb
+            await self._stop_cs2_c4_timer(reason)
+            return
+
+        if round_phase in ("over", "freezetime"):
+            await self._stop_cs2_c4_timer(round_phase)
+            return
+
+        if bomb_state in ("planted", "planting") or round_bomb == "planted":
+            countdown = float(CS2_C4_TOTAL_SECONDS)
+            if isinstance(bomb_info, dict) and bomb_info.get("countdown") is not None:
+                try:
+                    countdown = float(bomb_info["countdown"])
+                except (TypeError, ValueError):
+                    countdown = float(CS2_C4_TOTAL_SECONDS)
+            await self._start_cs2_c4_timer(countdown)
+
+    async def _handle_gsi_http_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        self._enable_tcp_nodelay(writer.transport)
+        try:
+            raw_headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=3.0)
+            header_text = raw_headers.decode("iso-8859-1", errors="replace")
+            content_length = 0
+            expect_continue = False
+            is_chunked = False
+
+            for line in header_text.split("\r\n")[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    key = k.strip().lower()
+                    val = v.strip()
+                    if key == "content-length":
+                        try:
+                            content_length = max(0, min(512 * 1024, int(val)))
+                        except ValueError:
+                            content_length = 0
+                    elif key == "expect" and "100-continue" in val.lower():
+                        expect_continue = True
+                    elif key == "transfer-encoding" and "chunked" in val.lower():
+                        is_chunked = True
+
+            # CS2 (libcurl) pode enviar Expect: 100-continue em payloads > 1 KB
+            if expect_continue:
+                writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+                await writer.drain()
+
+            body = b""
+            if is_chunked:
+                chunks: list[bytes] = []
+                total_len = 0
+                while total_len < 512 * 1024:
+                    size_line = await asyncio.wait_for(reader.readline(), timeout=3.0)
+                    if not size_line:
+                        break
+                    chunk_size = int(size_line.split(b";", 1)[0].strip(), 16)
+                    if chunk_size <= 0:
+                        await asyncio.wait_for(reader.readexactly(2), timeout=2.0)
+                        break
+                    chunk_data = await asyncio.wait_for(reader.readexactly(chunk_size), timeout=3.0)
+                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0)
+                    chunks.append(chunk_data)
+                    total_len += chunk_size
+                body = b"".join(chunks)
+            elif content_length > 0:
+                body = await asyncio.wait_for(reader.readexactly(content_length), timeout=3.0)
+
+            # Dispara o processamento/WebSocket imediatamente antes de encerrar a conexão HTTP
+            if body:
+                try:
+                    payload = json.loads(body.decode("utf-8", errors="replace"))
+                    if isinstance(payload, dict):
+                        await self._handle_cs2_gsi_payload(payload)
+                except json.JSONDecodeError:
+                    self.log.warning("[CS2 GSI] Payload JSON inválido recebido na porta %d.", self.gsi_port)
+
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: 2\r\n"
+                b"Connection: close\r\n\r\nOK"
+            )
+            await writer.drain()
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except OSError:
+                pass
+
+    async def _start_cs2_gsi_server(self) -> None:
+        if self._gsi_server is not None or self.gsi_port <= 0:
+            return
+        try:
+            self._gsi_server = await asyncio.start_server(
+                self._handle_gsi_http_client,
+                host="127.0.0.1",
+                port=self.gsi_port,
+            )
+            self.log.info("CS2 GSI      : http://127.0.0.1:%d (escutando C4)", self.gsi_port)
+        except OSError as exc:
+            self.log.warning(
+                "CS2 GSI      : porta %d indisponível (%s) — timer C4 desativado nesta instância.",
+                self.gsi_port,
+                exc,
+            )
+            self._gsi_server = None
+
+    async def _stop_cs2_gsi_server(self) -> None:
+        if self._c4_task and not self._c4_task.done():
+            self._c4_task.cancel()
+            try:
+                await self._c4_task
+            except asyncio.CancelledError:
+                pass
+        self._c4_task = None
+        if self._gsi_server is not None:
+            self._gsi_server.close()
+            try:
+                await self._gsi_server.wait_closed()
+            except OSError:
+                pass
+            self._gsi_server = None
+
+    # ------------------------------------------------------------------
     # Aplicação de Eventos ESP32 -> Windows
     # ------------------------------------------------------------------
 
@@ -785,6 +1083,18 @@ class MiniDeckWiFiBridge:
                 await self._sync_media_to_esp32(ws, audio=audio, force=True)
             return
 
+        if cmd == "macro":
+            action = str(msg.get("action", "")).lower()
+            ok = self._execute_macro(action)
+            self.log.info(
+                "[ESP32 WiFi -> Windows] Atalho '%s' -> %s",
+                action,
+                "OK" if ok else "FALHA",
+            )
+            if action == "cs2_c4":
+                await self._sync_cs2_c4_to_esp32(ws)
+            return
+
         if event == "screen":
             screen = str(msg.get("screen", "")).lower()
             if screen == "media":
@@ -792,8 +1102,11 @@ class MiniDeckWiFiBridge:
                 await self._sync_browser_channel(ws, audio)
                 await self._sync_media_to_esp32(ws, audio=None, force=True)
             elif screen == "hardware":
-                self.log.info("[ESP32 WiFi] Tela Hardware aberta -> enviando telemetria CPU/RAM...")
+                self.log.info("[ESP32 WiFi] Tela Hardware aberta -> enviando telemetria CPU/RAM/GPU...")
                 await self._sync_stats_to_esp32(ws, log_once=False)
+            elif screen == "macros":
+                self.log.info("[ESP32 WiFi] Tela Atalhos aberta -> sincronizando estado CS2 C4...")
+                await self._sync_cs2_c4_to_esp32(ws)
             return
 
         if event == "pong":
@@ -804,6 +1117,7 @@ class MiniDeckWiFiBridge:
             await self._sync_to_esp32(ws, audio, force_all=True)
             await self._sync_media_to_esp32(ws, audio=None, force=True)
             await self._sync_stats_to_esp32(ws, log_once=False)
+            await self._sync_cs2_c4_to_esp32(ws)
             return
 
         if event == "set_vol" and target:
@@ -990,9 +1304,13 @@ class MiniDeckWiFiBridge:
         audio: AudioController,
         deadline: Optional[float],
     ) -> None:
+        self._active_ws = ws
+        if self._enable_tcp_nodelay(getattr(ws, "transport", None)):
+            self.log.info("  WebSocket      -> TCP_NODELAY ativo (baixa latência)")
         await self._sync_to_esp32(ws, audio, force_all=True)
         await self._sync_media_to_esp32(ws, audio=audio, force=True)
         await self._sync_stats_to_esp32(ws, log_once=True)
+        await self._sync_cs2_c4_to_esp32(ws)
 
         for target, snap in self._last_channels.items():
             proc_info = snap.process_name or "aguardando app"
@@ -1062,6 +1380,7 @@ class MiniDeckWiFiBridge:
                 if exc is not None:
                     raise exc
         finally:
+            self._active_ws = None
             if not t_rx.done():
                 t_rx.cancel()
             if not t_poll.done():
@@ -1076,6 +1395,7 @@ class MiniDeckWiFiBridge:
         last_endpoint: Optional[tuple[str, int]] = None
 
         try:
+            await self._start_cs2_gsi_server()
             with AudioController() as audio:
                 self.log.info("Saída padrão : %s", audio.get_master_device_name() or "N/A")
                 self.log.info("Microfone    : %s", audio.get_mic_device_name() or "N/A")
@@ -1130,6 +1450,7 @@ class MiniDeckWiFiBridge:
                         break
                     await asyncio.sleep(RECONNECT_DELAY_S)
         finally:
+            await self._stop_cs2_gsi_server()
             self._gpu.close()
         self.log.info("Wi-Fi Bridge finalizada com segurança.")
 
@@ -1154,6 +1475,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_WS_PORT,
         help=f"Porta WebSocket do ESP32 quando --host for usado (padrão: {DEFAULT_WS_PORT})",
+    )
+    parser.add_argument(
+        "--gsi-port",
+        type=int,
+        default=DEFAULT_CS2_GSI_PORT,
+        help=f"Porta HTTP local para CS2 Game State Integration (padrão: {DEFAULT_CS2_GSI_PORT}, 0 desativa)",
     )
     parser.add_argument("--verbose", action="store_true", help="Exibe todos os pacotes JSON TX/RX")
     parser.add_argument(
@@ -1188,6 +1515,7 @@ def main() -> None:
         udp_port=args.udp_port,
         fixed_host=args.host,
         fixed_port=args.port,
+        gsi_port=args.gsi_port,
         verbose=args.verbose,
         logger=logger,
     )

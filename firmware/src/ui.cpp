@@ -29,7 +29,7 @@ constexpr uint32_t HEX_OK           = 0x10B981;
 
 constexpr uint32_t SLIDER_THROTTLE_MS = 40;
 constexpr uint32_t TOAST_DURATION_MS  = 1600;
-constexpr int      NUM_SCREENS        = 4;
+constexpr int      NUM_SCREENS        = 5;
 
 struct ChannelUi {
     const char *target;
@@ -91,25 +91,26 @@ const HubCardDef g_hub_cards[6] = {
     HubCardDef("mixer",    "Mixer",    PH_ICN_MIXER, HEX_CYAN, 0x083344, UI_SCREEN_AUDIO),
     HubCardDef("light",    "Brilho",   PH_ICN_SMART, 0xFBBF24, 0x3B2608, -1),
     HubCardDef("network",  "Rede",     PH_ICN_WIFI,  0x38BDF8, 0x0A2A43, -1),
-    HubCardDef("macros",   "Atalhos",  PH_ICN_APP,   0xA78BFA, 0x22184A, -1),
+    HubCardDef("macros",   "Atalhos",  PH_ICN_APP,   0xA78BFA, 0x22184A, UI_SCREEN_MACROS),
     HubCardDef("hardware", "Hardware", PH_ICN_CPU,   0x34D399, 0x064E3B, UI_SCREEN_HARDWARE),
 };
 
 // ============================================================================
 // Telas Principais e Widgets Persistentes
 // ============================================================================
-lv_obj_t *g_screens[NUM_SCREENS]      = {nullptr, nullptr, nullptr, nullptr};
-lv_obj_t *g_header_clock[NUM_SCREENS] = {nullptr, nullptr, nullptr, nullptr};
+lv_obj_t *g_screens[NUM_SCREENS]      = {nullptr, nullptr, nullptr, nullptr, nullptr};
+lv_obj_t *g_header_clock[NUM_SCREENS] = {nullptr, nullptr, nullptr, nullptr, nullptr};
 HeaderMicWidgets g_header_mic[NUM_SCREENS];
 
 // Badge de conexão no centro do Header da Home
 lv_obj_t *g_home_conn_badge = nullptr;
 lv_obj_t *g_home_conn_label = nullptr;
 
-// Sliders laterais esquerdos persistentes (Home/Hardware = Master, Mídia = Browser/Edge)
+// Sliders laterais esquerdos persistentes (Home/Hardware/Atalhos = Master, Mídia = Browser/Edge)
 SidebarWidgets g_home_sidebar;
 SidebarWidgets g_media_sidebar;
 SidebarWidgets g_hw_sidebar;
+SidebarWidgets g_macros_sidebar;
 
 // Toast flutuante da Home
 lv_obj_t *g_home_toast       = nullptr;
@@ -142,6 +143,13 @@ lv_obj_t *g_hw_ram_pct_lbl   = nullptr;
 lv_obj_t *g_hw_ram_bar       = nullptr;
 lv_obj_t *g_hw_ram_gb_lbl    = nullptr;
 
+// Widgets do Módulo CS2 C4 (Card 6 em screen_macros)
+lv_obj_t *g_c4_btn      = nullptr;
+lv_obj_t *g_c4_accent   = nullptr;
+lv_obj_t *g_c4_icon_lbl = nullptr;
+lv_obj_t *g_c4_main_lbl = nullptr;
+lv_obj_t *g_c4_sub_lbl  = nullptr;
+
 // Estado Global Compartilhado
 UiConnState g_conn_state = UI_CONN_WAITING;
 bool g_mic_muted         = false;
@@ -155,6 +163,7 @@ UiVolumeCallback g_vol_cb    = nullptr;
 UiMuteCallback   g_mute_cb   = nullptr;
 UiMediaCallback  g_media_cb  = nullptr;
 UiScreenCallback g_screen_cb = nullptr;
+UiMacroCallback  g_macro_cb  = nullptr;
 
 // ============================================================================
 // Helpers Gerais
@@ -244,6 +253,7 @@ void update_channel_visuals(ChannelUi &ch)
     {
         update_sidebar_visuals(g_home_sidebar, ch, PH_ICN_VOL);
         update_sidebar_visuals(g_hw_sidebar, ch, PH_ICN_VOL);
+        update_sidebar_visuals(g_macros_sidebar, ch, PH_ICN_VOL);
     }
     else if (strcasecmp(ch.target, "browser") == 0)
     {
@@ -412,6 +422,10 @@ void sidebar_slider_cb(lv_event_t *e)
             {
                 lv_slider_set_value(g_hw_sidebar.slider, ch.value, LV_ANIM_OFF);
             }
+            if (sb != &g_macros_sidebar && g_macros_sidebar.slider)
+            {
+                lv_slider_set_value(g_macros_sidebar.slider, ch.value, LV_ANIM_OFF);
+            }
         }
         g_syncing_from_pc = false;
 
@@ -471,6 +485,10 @@ void audio_slider_event_cb(lv_event_t *e)
             if (g_hw_sidebar.slider)
             {
                 lv_slider_set_value(g_hw_sidebar.slider, ch->value, LV_ANIM_OFF);
+            }
+            if (g_macros_sidebar.slider)
+            {
+                lv_slider_set_value(g_macros_sidebar.slider, ch->value, LV_ANIM_OFF);
             }
             g_syncing_from_pc = false;
         }
@@ -579,6 +597,17 @@ void media_action_btn_cb(lv_event_t *e)
     if (g_media_cb)
     {
         g_media_cb(action);
+    }
+}
+
+void macro_btn_cb(lv_event_t *e)
+{
+    const char *action = static_cast<const char *>(lv_event_get_user_data(e));
+    if (!action) return;
+
+    if (g_macro_cb)
+    {
+        g_macro_cb(action);
     }
 }
 
@@ -1240,6 +1269,141 @@ void build_screen_hardware()
     lv_obj_set_style_text_color(g_hw_ram_gb_lbl, lv_color_hex(0xCBD5E1), 0);
 }
 
+// ============================================================================
+// Tela 5: screen_macros (Header 58px + Sidebar Master + Grade 2x3 + CS2 C4)
+// ============================================================================
+struct MacroCardDef {
+    const char *action;
+    const char *title;
+    const char *icon_utf8;
+    uint32_t accent_hex;
+    uint32_t press_bg_hex;
+
+    MacroCardDef(const char *a, const char *t, const char *ic, uint32_t acc, uint32_t pbg)
+        : action(a), title(t), icon_utf8(ic), accent_hex(acc), press_bg_hex(pbg) {}
+};
+
+const MacroCardDef g_macro_cards[5] = {
+    MacroCardDef("edge",    "EDGE",    PH_ICN_BROWSER, 0x38BDF8, 0x0A2A43),
+    MacroCardDef("steam",   "STEAM",   PH_ICN_GAME,    0x60A5FA, 0x102542),
+    MacroCardDef("discord", "DISCORD", PH_ICN_DISCORD, 0x818CF8, 0x1E1B4B),
+    MacroCardDef("disney",  "DISNEY+", PH_ICN_FILM,    0x22D3EE, 0x083344),
+    MacroCardDef("hbo",     "MAX",     PH_ICN_MPLAY,   0xA855F7, 0x2E1065),
+};
+
+void build_screen_macros()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_MACROS] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_MACROS, PH_ICN_APP, "ATALHOS", 0xA78BFA);
+    build_volume_sidebar(scr, g_macros_sidebar, 0, PH_ICN_VOL);
+
+    // Grade 2x3: x=84..474 (390px), y=68..314 (246px)
+    constexpr int16_t GRID_X = 84;
+    constexpr int16_t GRID_Y = 68;
+    constexpr int16_t CARD_W = 124;
+    constexpr int16_t CARD_H = 118;
+    constexpr int16_t GAP_X  = 9;
+    constexpr int16_t GAP_Y  = 10;
+
+    // 5 Cards de Aplicativos / Streaming
+    for (int i = 0; i < 5; ++i)
+    {
+        const MacroCardDef &def = g_macro_cards[i];
+        const int col = i % 3;
+        const int row = i / 3;
+        const int16_t x = GRID_X + col * (CARD_W + GAP_X);
+        const int16_t y = GRID_Y + row * (CARD_H + GAP_Y);
+
+        lv_obj_t *btn = lv_btn_create(scr);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_pos(btn, x, y);
+        lv_obj_set_size(btn, CARD_W, CARD_H);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_set_style_radius(btn, 16, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
+
+        lv_obj_set_style_bg_color(btn, lv_color_hex(def.press_bg_hex), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(btn, 2, LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(btn, lv_color_hex(def.accent_hex), LV_STATE_PRESSED);
+
+        lv_obj_t *accent = lv_obj_create(btn);
+        lv_obj_remove_style_all(accent);
+        lv_obj_set_size(accent, 42, 3);
+        lv_obj_set_style_radius(accent, 2, 0);
+        lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(accent, lv_color_hex(def.accent_hex), 0);
+        lv_obj_align(accent, LV_ALIGN_TOP_MID, 0, 0);
+
+        lv_obj_t *icon_lbl = lv_label_create(btn);
+        lv_label_set_text(icon_lbl, def.icon_utf8);
+        lv_obj_set_style_text_font(icon_lbl, &phosphor_32, 0);
+        lv_obj_set_style_text_color(icon_lbl, lv_color_hex(def.accent_hex), 0);
+        lv_obj_align(icon_lbl, LV_ALIGN_CENTER, 0, -14);
+
+        lv_obj_t *title_lbl = lv_label_create(btn);
+        lv_label_set_text(title_lbl, def.title);
+        lv_obj_set_style_text_font(title_lbl, &inter_bold_16, 0);
+        lv_obj_set_style_text_color(title_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+        lv_obj_align(title_lbl, LV_ALIGN_BOTTOM_MID, 0, -16);
+
+        lv_obj_add_event_cb(btn, macro_btn_cb, LV_EVENT_CLICKED, const_cast<char *>(def.action));
+    }
+
+    // Card 6 (col=2, row=1): Widget Especial CS2 C4 (GSI Timer Dinâmico)
+    const int16_t c4_x = GRID_X + 2 * (CARD_W + GAP_X);
+    const int16_t c4_y = GRID_Y + 1 * (CARD_H + GAP_Y);
+
+    g_c4_btn = lv_btn_create(scr);
+    lv_obj_remove_style_all(g_c4_btn);
+    lv_obj_set_pos(g_c4_btn, c4_x, c4_y);
+    lv_obj_set_size(g_c4_btn, CARD_W, CARD_H);
+    lv_obj_clear_flag(g_c4_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(g_c4_btn, 16, 0);
+    lv_obj_set_style_bg_opa(g_c4_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(g_c4_btn, 1, 0);
+    lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(0x3B2308), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(g_c4_btn, 2, LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(HEX_WARN), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(g_c4_btn, macro_btn_cb, LV_EVENT_CLICKED, const_cast<char *>("cs2_c4"));
+
+    g_c4_accent = lv_obj_create(g_c4_btn);
+    lv_obj_remove_style_all(g_c4_accent);
+    lv_obj_set_size(g_c4_accent, 42, 3);
+    lv_obj_set_style_radius(g_c4_accent, 2, 0);
+    lv_obj_set_style_bg_opa(g_c4_accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_c4_accent, lv_color_hex(HEX_WARN), 0);
+    lv_obj_align(g_c4_accent, LV_ALIGN_TOP_MID, 0, 0);
+
+    g_c4_icon_lbl = lv_label_create(g_c4_btn);
+    lv_label_set_text(g_c4_icon_lbl, PH_ICN_CROSSHAIR);
+    lv_obj_set_style_text_font(g_c4_icon_lbl, &phosphor_32, 0);
+    lv_obj_set_style_text_color(g_c4_icon_lbl, lv_color_hex(HEX_WARN), 0);
+    lv_obj_align(g_c4_icon_lbl, LV_ALIGN_TOP_MID, 0, 14);
+
+    g_c4_main_lbl = lv_label_create(g_c4_btn);
+    lv_label_set_text(g_c4_main_lbl, "CS2 C4");
+    lv_obj_set_style_text_font(g_c4_main_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_c4_main_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+    lv_obj_align(g_c4_main_lbl, LV_ALIGN_CENTER, 0, 16);
+
+    g_c4_sub_lbl = lv_label_create(g_c4_btn);
+    lv_label_set_text(g_c4_sub_lbl, "AGUARDANDO");
+    lv_obj_set_style_text_font(g_c4_sub_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_c4_sub_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+    lv_obj_align(g_c4_sub_lbl, LV_ALIGN_BOTTOM_MID, 0, -10);
+}
+
 void apply_home_conn_badge_style(UiConnState state)
 {
     if (!g_home_conn_badge || !g_home_conn_label) return;
@@ -1292,22 +1456,26 @@ void ui_init(
     UiVolumeCallback on_volume_change,
     UiMuteCallback on_mute_toggle,
     UiMediaCallback on_media_action,
-    UiScreenCallback on_screen_change)
+    UiScreenCallback on_screen_change,
+    UiMacroCallback on_macro_action)
 {
     g_vol_cb = on_volume_change;
     g_mute_cb = on_mute_toggle;
     g_media_cb = on_media_action;
     g_screen_cb = on_screen_change;
+    g_macro_cb = on_macro_action;
 
     build_screen_home();
     build_screen_audio();
     build_screen_media();
     build_screen_hardware();
+    build_screen_macros();
 
     update_mic_visuals();
     update_sidebar_visuals(g_home_sidebar, g_channels[0], PH_ICN_VOL);
     update_sidebar_visuals(g_media_sidebar, g_channels[1], PH_ICN_BROWSER);
     update_sidebar_visuals(g_hw_sidebar, g_channels[0], PH_ICN_VOL);
+    update_sidebar_visuals(g_macros_sidebar, g_channels[0], PH_ICN_VOL);
     update_media_play_visuals();
     apply_home_conn_badge_style(UI_CONN_WAITING);
 
@@ -1336,6 +1504,7 @@ void ui_show_screen(UiScreenId screen_id, bool animate)
         if (screen_id == UI_SCREEN_AUDIO) name = "audio";
         else if (screen_id == UI_SCREEN_MEDIA) name = "media";
         else if (screen_id == UI_SCREEN_HARDWARE) name = "hardware";
+        else if (screen_id == UI_SCREEN_MACROS) name = "macros";
         g_screen_cb(name);
     }
 }
@@ -1348,7 +1517,7 @@ void ui_sync_volume(const char *target, int value)
     const bool is_master  = (strcasecmp(ch->target, "master") == 0);
     const bool is_browser = (strcasecmp(ch->target, "browser") == 0);
     if (ch->dragging ||
-        (is_master && (g_home_sidebar.dragging || g_hw_sidebar.dragging)) ||
+        (is_master && (g_home_sidebar.dragging || g_hw_sidebar.dragging || g_macros_sidebar.dragging)) ||
         (is_browser && g_media_sidebar.dragging))
     {
         return;
@@ -1372,6 +1541,10 @@ void ui_sync_volume(const char *target, int value)
         if (g_hw_sidebar.slider)
         {
             lv_slider_set_value(g_hw_sidebar.slider, clamped, LV_ANIM_OFF);
+        }
+        if (g_macros_sidebar.slider)
+        {
+            lv_slider_set_value(g_macros_sidebar.slider, clamped, LV_ANIM_OFF);
         }
     }
     if (is_browser && g_media_sidebar.slider)
@@ -1540,6 +1713,84 @@ void ui_sync_stats(int cpu_pct, int gpu_pct, int ram_pct, const char *ram_used, 
         snprintf(gbuf, sizeof(gbuf), "%s GB / %s GB", ram_used, ram_total);
         lv_label_set_text(g_hw_ram_gb_lbl, gbuf);
     }
+}
+
+void ui_sync_cs2_c4(const char *state, int time_left)
+{
+    if (!g_c4_btn || !g_c4_icon_lbl || !g_c4_main_lbl || !g_c4_sub_lbl) return;
+
+    const bool planted = (state != nullptr && strcasecmp(state, "planted") == 0);
+    if (!planted)
+    {
+        lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(g_c4_btn, 1, 0);
+        lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(HEX_CARD_BORDER), 0);
+        if (g_c4_accent)
+        {
+            lv_obj_set_style_bg_color(g_c4_accent, lv_color_hex(HEX_WARN), 0);
+        }
+        lv_label_set_text(g_c4_icon_lbl, PH_ICN_CROSSHAIR);
+        lv_obj_set_style_text_color(g_c4_icon_lbl, lv_color_hex(HEX_WARN), 0);
+
+        lv_label_set_text(g_c4_main_lbl, "CS2 C4");
+        lv_obj_set_style_text_font(g_c4_main_lbl, &inter_bold_16, 0);
+        lv_obj_set_style_text_color(g_c4_main_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+        lv_obj_align(g_c4_main_lbl, LV_ALIGN_CENTER, 0, 16);
+
+        lv_label_set_text(g_c4_sub_lbl, "AGUARDANDO");
+        lv_obj_set_style_text_color(g_c4_sub_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+        return;
+    }
+
+    const int secs = (time_left < 0) ? 0 : time_left;
+    uint32_t bg_hex = 0x3B2308;
+    uint32_t bdr_hex = HEX_WARN;
+    uint32_t ic_hex = 0xFBBF24;
+    uint32_t txt_hex = 0xFDE68A;
+    const char *icon_utf8 = PH_ICN_FIRE;
+    const char *sub_txt = "C4 PLANTADA";
+
+    if (secs <= 5)
+    {
+        // Crítico (< 5s): impossível desarmar mesmo com kit
+        bg_hex = 0x991B1B;
+        bdr_hex = 0xFF4444;
+        ic_hex = 0xFFFFFF;
+        txt_hex = 0xFFFFFF;
+        icon_utf8 = PH_ICN_WARNING;
+        sub_txt = "CORRE!";
+    }
+    else if (secs <= 10)
+    {
+        // Alerta máximo (<= 10s): sem kit não dá mais tempo
+        bg_hex = 0x450A0A;
+        bdr_hex = 0xEF4444;
+        ic_hex = 0xF87171;
+        txt_hex = 0xFCA5A5;
+        icon_utf8 = PH_ICN_WARNING;
+        sub_txt = "SEM KIT!";
+    }
+
+    lv_obj_set_style_bg_color(g_c4_btn, lv_color_hex(bg_hex), 0);
+    lv_obj_set_style_border_width(g_c4_btn, 2, 0);
+    lv_obj_set_style_border_color(g_c4_btn, lv_color_hex(bdr_hex), 0);
+    if (g_c4_accent)
+    {
+        lv_obj_set_style_bg_color(g_c4_accent, lv_color_hex(bdr_hex), 0);
+    }
+
+    lv_label_set_text(g_c4_icon_lbl, icon_utf8);
+    lv_obj_set_style_text_color(g_c4_icon_lbl, lv_color_hex(ic_hex), 0);
+
+    char tbuf[16];
+    snprintf(tbuf, sizeof(tbuf), "%ds", secs);
+    lv_label_set_text(g_c4_main_lbl, tbuf);
+    lv_obj_set_style_text_font(g_c4_main_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(g_c4_main_lbl, lv_color_hex(txt_hex), 0);
+    lv_obj_align(g_c4_main_lbl, LV_ALIGN_CENTER, 0, 15);
+
+    lv_label_set_text(g_c4_sub_lbl, sub_txt);
+    lv_obj_set_style_text_color(g_c4_sub_lbl, lv_color_hex(txt_hex), 0);
 }
 
 void ui_set_conn_state(UiConnState state)
