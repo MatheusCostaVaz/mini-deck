@@ -461,12 +461,14 @@ static void handleIncomingMessage(String line, bool fromWifi, uint8_t wsClientNu
     else if (strcmp(syncType, "stats") == 0)
     {
         const int cpu = doc["cpu"] | 0;
+        const int cpuTemp = doc["cpu_temp"] | 0;
         const int gpu = doc["gpu"] | 0;
+        const int gpuTemp = doc["gpu_temp"] | 0;
         const int ramPct = doc["ram_pct"] | 0;
         const char *ramUsed = doc["ram_used"] | "0.0";
         const char *ramTotal = doc["ram_total"] | "0.0";
         const int diskPct = doc["disk_pct"] | -1;
-        ui_sync_stats(cpu, gpu, ramPct, ramUsed, ramTotal, diskPct);
+        ui_sync_stats(cpu, cpuTemp, gpu, gpuTemp, ramPct, ramUsed, ramTotal, diskPct);
         validMessage = true;
     }
     else if (strcmp(syncType, "cs2_c4") == 0)

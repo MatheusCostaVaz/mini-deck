@@ -232,6 +232,8 @@ class GpuMonitor:
             nvml.nvmlDeviceGetHandleByIndex_v2.restype = ctypes.c_int
             nvml.nvmlDeviceGetUtilizationRates.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NvmlUtilization)]
             nvml.nvmlDeviceGetUtilizationRates.restype = ctypes.c_int
+            nvml.nvmlDeviceGetTemperature.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)]
+            nvml.nvmlDeviceGetTemperature.restype = ctypes.c_int
             nvml.nvmlDeviceGetName.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
             nvml.nvmlDeviceGetName.restype = ctypes.c_int
 
@@ -358,22 +360,33 @@ class GpuMonitor:
         except (OSError, ValueError):
             return 0
 
-    async def read_percent(self) -> int:
+    async def read_metrics(self) -> tuple[int, Optional[int]]:
+        """Retorna (gpu_percent, gpu_temp_celsius_ou_None)."""
         if self.backend == "nvml" and self._nvml and self._nvml_dev:
+            pct = 0
+            temp_c: Optional[int] = None
             try:
                 util = _NvmlUtilization()
                 if self._nvml.nvmlDeviceGetUtilizationRates(self._nvml_dev, ctypes.byref(util)) == 0:
-                    return int(max(0, min(100, util.gpu)))
+                    pct = int(max(0, min(100, util.gpu)))
             except OSError:
                 pass
-            return 0
+            try:
+                raw_temp = ctypes.c_uint(0)
+                # NVML_TEMPERATURE_GPU = 0
+                if self._nvml.nvmlDeviceGetTemperature(self._nvml_dev, 0, ctypes.byref(raw_temp)) == 0:
+                    if 0 < raw_temp.value < 150:
+                        temp_c = int(raw_temp.value)
+            except OSError:
+                pass
+            return pct, temp_c
 
         if self.backend == "nvidia-smi" and self._nvidia_smi_path:
             try:
                 creationflags = 0x08000000 if os.name == "nt" else 0
                 proc = await asyncio.create_subprocess_exec(
                     self._nvidia_smi_path,
-                    "--query-gpu=utilization.gpu",
+                    "--query-gpu=utilization.gpu,temperature.gpu",
                     "--format=csv,noheader,nounits",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -382,15 +395,29 @@ class GpuMonitor:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1.0)
                 if proc.returncode == 0 and stdout:
                     first_line = stdout.decode("utf-8", errors="replace").splitlines()[0].strip()
-                    return int(round(max(0.0, min(100.0, float(first_line)))))
+                    parts = [p.strip() for p in first_line.split(",")]
+                    pct = int(round(max(0.0, min(100.0, float(parts[0]))))) if parts else 0
+                    temp_c = None
+                    if len(parts) >= 2:
+                        try:
+                            val = int(round(float(parts[1])))
+                            if 0 < val < 150:
+                                temp_c = val
+                        except ValueError:
+                            temp_c = None
+                    return pct, temp_c
             except (OSError, asyncio.TimeoutError, ValueError, IndexError):
-                return 0
-            return 0
+                return 0, None
+            return 0, None
 
         if self.backend == "pdh":
-            return self._read_pdh_sync()
+            return self._read_pdh_sync(), None
 
-        return 0
+        return 0, None
+
+    async def read_percent(self) -> int:
+        pct, _ = await self.read_metrics()
+        return pct
 
     def close(self) -> None:
         if self._nvml is not None:
@@ -408,6 +435,215 @@ class GpuMonitor:
             self._pdh = None
             self._pdh_query = None
             self._pdh_counter = None
+
+
+class CpuTempMonitor:
+    """Leitor leve de temperatura de CPU (°C) no Windows sem exigir privilégios de Admin.
+
+    Ordem de prioridade:
+      1. Windows PDH (\\Thermal Zone Information(*)\\Temperature) -> ~2 ms, sem elevação.
+      2. WMI (root\\LibreHardwareMonitor / root\\OpenHardwareMonitor / root\\wmi MSAcpi_ThermalZoneTemperature).
+      3. Fallback seguro -> None.
+    """
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._log = logger
+        self.backend = "none"
+        self._pdh = None
+        self._pdh_query = None
+        self._pdh_counter = None
+        self._wmi_service = None
+        self._wmi_mode = ""
+        self._init_backend()
+
+    def _init_backend(self) -> None:
+        if self._try_init_pdh():
+            return
+        if self._try_init_wmi():
+            return
+        self.backend = "none"
+
+    def _try_init_pdh(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            pdh = ctypes.WinDLL("pdh.dll")
+            pdh.PdhOpenQueryW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+            pdh.PdhOpenQueryW.restype = ctypes.c_uint32
+            pdh.PdhAddEnglishCounterW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            pdh.PdhAddEnglishCounterW.restype = ctypes.c_uint32
+            pdh.PdhCollectQueryData.argtypes = [ctypes.c_void_p]
+            pdh.PdhCollectQueryData.restype = ctypes.c_uint32
+            pdh.PdhGetFormattedCounterArrayW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.c_void_p,
+            ]
+            pdh.PdhGetFormattedCounterArrayW.restype = ctypes.c_uint32
+            pdh.PdhCloseQuery.argtypes = [ctypes.c_void_p]
+            pdh.PdhCloseQuery.restype = ctypes.c_uint32
+
+            query = ctypes.c_void_p()
+            if pdh.PdhOpenQueryW(None, None, ctypes.byref(query)) != 0:
+                return False
+
+            counter = ctypes.c_void_p()
+            status = pdh.PdhAddEnglishCounterW(
+                query,
+                r"\Thermal Zone Information(*)\Temperature",
+                None,
+                ctypes.byref(counter),
+            )
+            if status != 0:
+                pdh.PdhCloseQuery(query)
+                return False
+
+            self._pdh = pdh
+            self._pdh_query = query
+            self._pdh_counter = counter
+            # Valida se há ao menos uma zona térmica acessível
+            if self._read_pdh_temp() is not None:
+                self.backend = "pdh"
+                return True
+
+            pdh.PdhCloseQuery(query)
+            self._pdh = None
+            self._pdh_query = None
+            self._pdh_counter = None
+            return False
+        except (OSError, AttributeError):
+            return False
+
+    def _try_init_wmi(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            import comtypes.client
+
+            for ns, mode in (
+                ("winmgmts:\\\\.\\root\\LibreHardwareMonitor", "ohm"),
+                ("winmgmts:\\\\.\\root\\OpenHardwareMonitor", "ohm"),
+                ("winmgmts:\\\\.\\root\\wmi", "acpi"),
+            ):
+                try:
+                    svc = comtypes.client.GetObject(ns)
+                    self._wmi_service = svc
+                    self._wmi_mode = mode
+                    if self._read_wmi_temp() is not None:
+                        self.backend = f"wmi-{mode}"
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        self._wmi_service = None
+        self._wmi_mode = ""
+        return False
+
+    def _read_pdh_temp(self) -> Optional[int]:
+        if not self._pdh or not self._pdh_query or not self._pdh_counter:
+            return None
+        try:
+            if self._pdh.PdhCollectQueryData(self._pdh_query) != 0:
+                return None
+            PDH_FMT_DOUBLE = 0x00000200
+            PDH_MORE_DATA = 0x800007D2
+            buf_size = ctypes.c_uint32(0)
+            item_count = ctypes.c_uint32(0)
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                None,
+            )
+            if status != PDH_MORE_DATA or buf_size.value == 0:
+                return None
+
+            raw_buf = (ctypes.c_byte * buf_size.value)()
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                ctypes.byref(raw_buf),
+            )
+            if status != 0 or item_count.value == 0:
+                return None
+
+            items = ctypes.cast(raw_buf, ctypes.POINTER(_PdhFmtCounterValueItemW))
+            valid_c: list[float] = []
+            for i in range(item_count.value):
+                item = items[i]
+                if item.FmtValue.CStatus != 0:
+                    continue
+                val = item.FmtValue.doubleValue
+                # Thermal Zone Information retorna Kelvin (ex.: 318.0 -> 44.85 °C)
+                celsius = val - 273.15 if val > 150.0 else val
+                if 10.0 <= celsius <= 125.0:
+                    valid_c.append(celsius)
+            if not valid_c:
+                return None
+            return int(round(max(valid_c)))
+        except (OSError, ValueError):
+            return None
+
+    def _read_wmi_temp(self) -> Optional[int]:
+        if self._wmi_service is None:
+            return None
+        try:
+            if self._wmi_mode == "ohm":
+                sensors = self._wmi_service.ExecQuery(
+                    "SELECT Name, Value FROM Sensor WHERE SensorType='Temperature'"
+                )
+                cpu_vals: list[float] = []
+                for s in sensors:
+                    name = str(getattr(s, "Name", "") or "").lower()
+                    if "cpu" in name or "package" in name or "core" in name:
+                        val = float(getattr(s, "Value", 0.0) or 0.0)
+                        if 10.0 <= val <= 125.0:
+                            cpu_vals.append(val)
+                return int(round(max(cpu_vals))) if cpu_vals else None
+
+            if self._wmi_mode == "acpi":
+                zones = self._wmi_service.ExecQuery(
+                    "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"
+                )
+                vals: list[float] = []
+                for z in zones:
+                    raw = float(getattr(z, "CurrentTemperature", 0.0) or 0.0)
+                    celsius = (raw / 10.0) - 273.15
+                    if 10.0 <= celsius <= 125.0:
+                        vals.append(celsius)
+                return int(round(max(vals))) if vals else None
+        except Exception:
+            return None
+        return None
+
+    def read_temperature(self) -> Optional[int]:
+        if self.backend == "pdh":
+            return self._read_pdh_temp()
+        if self.backend.startswith("wmi-"):
+            return self._read_wmi_temp()
+        return None
+
+    def close(self) -> None:
+        if self._pdh is not None and self._pdh_query is not None:
+            try:
+                self._pdh.PdhCloseQuery(self._pdh_query)
+            except OSError:
+                pass
+            self._pdh = None
+            self._pdh_query = None
+            self._pdh_counter = None
+        self._wmi_service = None
 
 
 class _UdpDiscoveryProtocol(asyncio.DatagramProtocol):
@@ -471,9 +707,10 @@ class MiniDeckWiFiBridge:
         self._c4_deadline: Optional[float] = None
         self._c4_task: Optional[asyncio.Task] = None
 
-        # Inicializa o contador não-bloqueante de CPU do psutil e leitor de GPU
+        # Inicializa o contador não-bloqueante de CPU do psutil e leitores térmicos/GPU
         psutil.cpu_percent(interval=None)
         self._gpu = GpuMonitor(self.log)
+        self._cpu_temp = CpuTempMonitor(self.log)
 
     # ------------------------------------------------------------------
     # Auto-Discovery UDP (porta 4210)
@@ -736,7 +973,8 @@ class MiniDeckWiFiBridge:
 
     async def _read_system_stats(self) -> dict:
         cpu_pct = int(round(max(0.0, min(100.0, psutil.cpu_percent(interval=None)))))
-        gpu_pct = await self._gpu.read_percent()
+        cpu_temp = self._cpu_temp.read_temperature()
+        gpu_pct, gpu_temp = await self._gpu.read_metrics()
         vm = psutil.virtual_memory()
         ram_pct = int(round(max(0.0, min(100.0, vm.percent))))
         gb = 1024.0 ** 3
@@ -752,7 +990,9 @@ class MiniDeckWiFiBridge:
         payload: dict = {
             "sync": "stats",
             "cpu": cpu_pct,
+            "cpu_temp": cpu_temp,
             "gpu": gpu_pct,
+            "gpu_temp": gpu_temp,
             "ram_pct": ram_pct,
             "ram_used": ram_used,
             "ram_total": ram_total,
@@ -765,11 +1005,15 @@ class MiniDeckWiFiBridge:
         stats = await self._read_system_stats()
         await self._send_json(ws, stats)
         if log_once:
+            cpu_t = f" | {stats['cpu_temp']}°C" if stats.get("cpu_temp") else ""
+            gpu_t = f" | {stats['gpu_temp']}°C" if stats.get("gpu_temp") else ""
             disk_str = f" | Disco C: {stats['disk_pct']}%" if "disk_pct" in stats else ""
             self.log.info(
-                "  Hardware       -> CPU: %d%% | GPU: %d%% (%s) | RAM: %d%% (%s / %s GB)%s",
+                "  Hardware       -> CPU: %d%%%s | GPU: %d%%%s (%s) | RAM: %d%% (%s / %s GB)%s",
                 stats["cpu"],
+                cpu_t,
                 stats["gpu"],
+                gpu_t,
                 self._gpu.gpu_name,
                 stats["ram_pct"],
                 stats["ram_used"],
@@ -1400,6 +1644,7 @@ class MiniDeckWiFiBridge:
                 self.log.info("Saída padrão : %s", audio.get_master_device_name() or "N/A")
                 self.log.info("Microfone    : %s", audio.get_mic_device_name() or "N/A")
                 self.log.info("GPU Monitor  : %s [%s]", self._gpu.gpu_name, self._gpu.backend)
+                self.log.info("CPU Temp     : backend [%s]", self._cpu_temp.backend)
 
                 while True:
                     if deadline is not None and time.monotonic() >= deadline:
@@ -1452,6 +1697,7 @@ class MiniDeckWiFiBridge:
         finally:
             await self._stop_cs2_gsi_server()
             self._gpu.close()
+            self._cpu_temp.close()
         self.log.info("Wi-Fi Bridge finalizada com segurança.")
 
 

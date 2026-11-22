@@ -129,12 +129,14 @@ lv_obj_t *g_media_play_icon  = nullptr;
 // Widgets do Monitor de Hardware (screen_hardware)
 lv_obj_t *g_hw_cpu_accent    = nullptr;
 lv_obj_t *g_hw_cpu_pct_lbl   = nullptr;
+lv_obj_t *g_hw_cpu_temp_lbl  = nullptr;
 lv_obj_t *g_hw_cpu_bar       = nullptr;
 lv_obj_t *g_hw_cpu_state_lbl = nullptr;
 lv_obj_t *g_hw_disk_lbl      = nullptr;
 
 lv_obj_t *g_hw_gpu_accent    = nullptr;
 lv_obj_t *g_hw_gpu_pct_lbl   = nullptr;
+lv_obj_t *g_hw_gpu_temp_lbl  = nullptr;
 lv_obj_t *g_hw_gpu_bar       = nullptr;
 lv_obj_t *g_hw_gpu_state_lbl = nullptr;
 
@@ -1190,6 +1192,13 @@ void build_screen_hardware()
     lv_obj_set_style_text_font(cpu_title, &inter_bold_16, 0);
     lv_obj_set_style_text_color(cpu_title, lv_color_hex(HEX_TEXT_MAIN), 0);
 
+    g_hw_cpu_temp_lbl = lv_label_create(cpu_card);
+    lv_label_set_text(g_hw_cpu_temp_lbl, "");
+    lv_obj_set_style_text_font(g_hw_cpu_temp_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_hw_cpu_temp_lbl, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_align(g_hw_cpu_temp_lbl, LV_ALIGN_TOP_RIGHT, -14, 12);
+    lv_obj_add_flag(g_hw_cpu_temp_lbl, LV_OBJ_FLAG_HIDDEN);
+
     g_hw_cpu_pct_lbl = lv_label_create(cpu_card);
     lv_label_set_text(g_hw_cpu_pct_lbl, "--%");
     lv_obj_set_style_text_font(g_hw_cpu_pct_lbl, &lv_font_montserrat_20, 0);
@@ -1224,6 +1233,13 @@ void build_screen_hardware()
     lv_obj_set_pos(gpu_title, 40, 12);
     lv_obj_set_style_text_font(gpu_title, &inter_bold_16, 0);
     lv_obj_set_style_text_color(gpu_title, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    g_hw_gpu_temp_lbl = lv_label_create(gpu_card);
+    lv_label_set_text(g_hw_gpu_temp_lbl, "");
+    lv_obj_set_style_text_font(g_hw_gpu_temp_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_hw_gpu_temp_lbl, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_align(g_hw_gpu_temp_lbl, LV_ALIGN_TOP_RIGHT, -14, 12);
+    lv_obj_add_flag(g_hw_gpu_temp_lbl, LV_OBJ_FLAG_HIDDEN);
 
     g_hw_gpu_pct_lbl = lv_label_create(gpu_card);
     lv_label_set_text(g_hw_gpu_pct_lbl, "--%");
@@ -1596,11 +1612,55 @@ void ui_sync_media(const char *title, const char *artist, bool playing)
     update_media_play_visuals();
 }
 
-void ui_sync_stats(int cpu_pct, int gpu_pct, int ram_pct, const char *ram_used, const char *ram_total, int disk_pct)
+void ui_sync_stats(
+    int cpu_pct,
+    int cpu_temp,
+    int gpu_pct,
+    int gpu_temp,
+    int ram_pct,
+    const char *ram_used,
+    const char *ram_total,
+    int disk_pct)
 {
     const int cpu = clamp_vol(cpu_pct);
     const int gpu = clamp_vol(gpu_pct);
     const int ram = clamp_vol(ram_pct);
+
+    auto update_temp_and_pct = [](lv_obj_t *pct_lbl, lv_obj_t *temp_lbl, int pct, uint32_t pct_color, int temp_c) {
+        if (!pct_lbl) return;
+        char pbuf[16];
+        snprintf(pbuf, sizeof(pbuf), "%d%%", pct);
+        lv_label_set_text(pct_lbl, pbuf);
+        lv_obj_set_style_text_color(pct_lbl, lv_color_hex(pct_color), 0);
+
+        if (temp_lbl && temp_c > 0)
+        {
+            char tbuf[20];
+            snprintf(tbuf, sizeof(tbuf), "| %d\xC2\xB0" "C", temp_c);
+            lv_label_set_text(temp_lbl, tbuf);
+            uint32_t temp_color = 0xCBD5E1;
+            if (temp_c > 80)
+            {
+                temp_color = 0xEF4444; // Vermelho: alerta de aquecimento (> 80°C)
+            }
+            else if (temp_c >= 72)
+            {
+                temp_color = HEX_WARN; // Laranja/âmbar: temperatura elevada
+            }
+            lv_obj_set_style_text_color(temp_lbl, lv_color_hex(temp_color), 0);
+            lv_obj_clear_flag(temp_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(temp_lbl, LV_ALIGN_TOP_RIGHT, -14, 12);
+            lv_obj_align_to(pct_lbl, temp_lbl, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+        }
+        else
+        {
+            if (temp_lbl)
+            {
+                lv_obj_add_flag(temp_lbl, LV_OBJ_FLAG_HIDDEN);
+            }
+            lv_obj_align(pct_lbl, LV_ALIGN_TOP_RIGHT, -14, 8);
+        }
+    };
 
     // Cor dinâmica para CPU: verde/esmeralda (<65%), âmbar (65-84%), vermelho (>=85%)
     uint32_t cpu_color = 0x34D399;
@@ -1615,6 +1675,10 @@ void ui_sync_stats(int cpu_pct, int gpu_pct, int ram_pct, const char *ram_used, 
         cpu_color = HEX_WARN;
         cpu_state = "Carga moderada";
     }
+    if (cpu_temp > 80)
+    {
+        cpu_state = "Temperatura alta!";
+    }
 
     if (g_hw_cpu_bar)
     {
@@ -1623,19 +1687,13 @@ void ui_sync_stats(int cpu_pct, int gpu_pct, int ram_pct, const char *ram_used, 
     }
     if (g_hw_cpu_accent)
     {
-        lv_obj_set_style_bg_color(g_hw_cpu_accent, lv_color_hex(cpu_color), 0);
+        lv_obj_set_style_bg_color(g_hw_cpu_accent, lv_color_hex(cpu_temp > 80 ? 0xEF4444 : cpu_color), 0);
     }
-    if (g_hw_cpu_pct_lbl)
-    {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d%%", cpu);
-        lv_label_set_text(g_hw_cpu_pct_lbl, buf);
-        lv_obj_set_style_text_color(g_hw_cpu_pct_lbl, lv_color_hex(cpu_color), 0);
-    }
+    update_temp_and_pct(g_hw_cpu_pct_lbl, g_hw_cpu_temp_lbl, cpu, cpu_color, cpu_temp);
     if (g_hw_cpu_state_lbl)
     {
         lv_label_set_text(g_hw_cpu_state_lbl, cpu_state);
-        lv_obj_set_style_text_color(g_hw_cpu_state_lbl, lv_color_hex(cpu >= 85 ? 0xF87171 : HEX_TEXT_DIM), 0);
+        lv_obj_set_style_text_color(g_hw_cpu_state_lbl, lv_color_hex((cpu >= 85 || cpu_temp > 80) ? 0xF87171 : HEX_TEXT_DIM), 0);
     }
     if (g_hw_disk_lbl && disk_pct >= 0)
     {
@@ -1657,6 +1715,10 @@ void ui_sync_stats(int cpu_pct, int gpu_pct, int ram_pct, const char *ram_used, 
         gpu_color = HEX_WARN;
         gpu_state = "Carga moderada";
     }
+    if (gpu_temp > 80)
+    {
+        gpu_state = "Temperatura alta!";
+    }
 
     if (g_hw_gpu_bar)
     {
@@ -1665,19 +1727,13 @@ void ui_sync_stats(int cpu_pct, int gpu_pct, int ram_pct, const char *ram_used, 
     }
     if (g_hw_gpu_accent)
     {
-        lv_obj_set_style_bg_color(g_hw_gpu_accent, lv_color_hex(gpu_color), 0);
+        lv_obj_set_style_bg_color(g_hw_gpu_accent, lv_color_hex(gpu_temp > 80 ? 0xEF4444 : gpu_color), 0);
     }
-    if (g_hw_gpu_pct_lbl)
-    {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d%%", gpu);
-        lv_label_set_text(g_hw_gpu_pct_lbl, buf);
-        lv_obj_set_style_text_color(g_hw_gpu_pct_lbl, lv_color_hex(gpu_color), 0);
-    }
+    update_temp_and_pct(g_hw_gpu_pct_lbl, g_hw_gpu_temp_lbl, gpu, gpu_color, gpu_temp);
     if (g_hw_gpu_state_lbl)
     {
         lv_label_set_text(g_hw_gpu_state_lbl, gpu_state);
-        lv_obj_set_style_text_color(g_hw_gpu_state_lbl, lv_color_hex(gpu >= 85 ? 0xF87171 : HEX_TEXT_DIM), 0);
+        lv_obj_set_style_text_color(g_hw_gpu_state_lbl, lv_color_hex((gpu >= 85 || gpu_temp > 80) ? 0xF87171 : HEX_TEXT_DIM), 0);
     }
 
     // Cor dinâmica para RAM: azul céu (<70%), âmbar (70-84%), vermelho (>=85%)

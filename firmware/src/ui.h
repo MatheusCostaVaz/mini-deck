@@ -74,7 +74,15 @@ void ui_sync_volume(const char *target, int value);
 void ui_sync_mute(const char *target, bool muted);
 void ui_sync_label(const char *target, const char *label);
 void ui_sync_media(const char *title, const char *artist, bool playing);
-void ui_sync_stats(int cpu_pct, int gpu_pct, int ram_pct, const char *ram_used, const char *ram_total, int disk_pct = -1);
+void ui_sync_stats(
+    int cpu_pct,
+    int cpu_temp,
+    int gpu_pct,
+    int gpu_temp,
+    int ram_pct,
+    const char *ram_used,
+    const char *ram_total,
+    int disk_pct = -1);
 void ui_sync_cs2_c4(const char *state, int time_left);
 void ui_set_conn_state(UiConnState state);
 void ui_set_pc_connected(bool connected);
