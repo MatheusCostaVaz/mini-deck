@@ -20,17 +20,22 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 import sys
 import time
+import webbrowser
 from dataclasses import dataclass
 from typing import Optional
 
 from _ctypes import COMError
+import psutil
 import websockets
 from websockets.exceptions import WebSocketException
 
 from audio_controller import AudioAppSession, AudioController
+from media_controller import MediaController, MediaSnapshot
 
 BROWSER_CANDIDATES = (
     "msedge.exe",
@@ -49,6 +54,27 @@ CHAT_CANDIDATES = (
     "slack.exe",
     "telegram.exe",
 )
+
+KNOWN_GAME_CANDIDATES = (
+    "cs2.exe",
+    "tslgame.exe",
+    "watchdogs.exe",
+    "watchdogs2.exe",
+    "watchdogslegion.exe",
+    "wardogsclient-win64-shipping.exe",
+    "wardogs.exe",
+)
+
+LAUNCHER_FALLBACK_PROCESSES = {
+    "steam.exe",
+    "steamwebhelper.exe",
+    "epicgameslauncher.exe",
+    "upc.exe",
+    "ubisoftconnect.exe",
+    "battle.net.exe",
+    "eadesktop.exe",
+    "spotify.exe",
+}
 
 IGNORED_UTILITY_PROCESSES = {
     "nvidia rtx voice.exe",
@@ -73,13 +99,23 @@ FRIENDLY_LABELS = {
     "zoom.exe": "ZOOM",
     "slack.exe": "SLACK",
     "telegram.exe": "TELEGRAM",
+    "cs2.exe": "CS2",
+    "tslgame.exe": "PUBG",
+    "watchdogs.exe": "WATCHDOGS",
+    "watchdogs2.exe": "WATCHDOGS",
+    "watchdogslegion.exe": "WATCHDOGS",
+    "wardogsclient-win64-shipping.exe": "WARDOGS",
+    "wardogs.exe": "WARDOGS",
     "steam.exe": "STEAM",
     "spotify.exe": "SPOTIFY",
 }
 
 DEFAULT_UDP_PORT = 4210
 DEFAULT_WS_PORT = 81
+DEFAULT_CS2_GSI_PORT = 3000
+CS2_C4_TOTAL_SECONDS = 40
 POLL_INTERVAL_S = 0.25
+STATS_POLL_TICKS = 6  # 6 * 0.25s = 1.5s
 APP_PING_INTERVAL_S = 2.0
 RECONNECT_DELAY_S = 2.0
 RECENT_ESP_WRITE_GRACE_S = 0.35
@@ -152,6 +188,492 @@ def _release_mutex(handle) -> None:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+class _NvmlUtilization(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+
+class _PdhFmtCounterValue(ctypes.Structure):
+    _fields_ = [
+        ("CStatus", ctypes.c_uint32),
+        ("_pad", ctypes.c_uint32),
+        ("doubleValue", ctypes.c_double),
+    ]
+
+
+class _PdhFmtCounterValueItemW(ctypes.Structure):
+    _fields_ = [
+        ("szName", ctypes.c_wchar_p),
+        ("FmtValue", _PdhFmtCounterValue),
+    ]
+
+
+class GpuMonitor:
+    """Leitor leve e não bloqueante de utilização de GPU (%) no Windows.
+
+    Ordem de prioridade:
+      1. NVIDIA NVML (nvml.dll via ctypes) -> < 1 ms em memória, sem abrir subprocessos.
+      2. nvidia-smi assíncrono (CREATE_NO_WINDOW) -> fallback para GPUs NVIDIA.
+      3. Windows PDH (\\GPU Engine(*)\\Utilization Percentage) -> Intel/AMD integrada ou dedicada.
+      4. Fallback seguro -> 0%.
+    """
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._log = logger
+        self.backend = "none"
+        self.gpu_name = "N/A"
+
+        # Estado NVML
+        self._nvml = None
+        self._nvml_dev = None
+
+        # Estado nvidia-smi
+        self._nvidia_smi_path: Optional[str] = None
+
+        # Estado Windows PDH
+        self._pdh = None
+        self._pdh_query = None
+        self._pdh_counter = None
+
+        self._init_backend()
+
+    def _init_backend(self) -> None:
+        if self._try_init_nvml():
+            return
+        smi = shutil.which("nvidia-smi")
+        if smi:
+            self._nvidia_smi_path = smi
+            self.backend = "nvidia-smi"
+            self.gpu_name = "NVIDIA GPU"
+            return
+        if self._try_init_pdh():
+            return
+        self.backend = "none"
+
+    def _try_init_nvml(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            nvml = ctypes.WinDLL("nvml.dll")
+            nvml.nvmlInit_v2.restype = ctypes.c_int
+            nvml.nvmlShutdown.restype = ctypes.c_int
+            nvml.nvmlDeviceGetHandleByIndex_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+            nvml.nvmlDeviceGetHandleByIndex_v2.restype = ctypes.c_int
+            nvml.nvmlDeviceGetUtilizationRates.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NvmlUtilization)]
+            nvml.nvmlDeviceGetUtilizationRates.restype = ctypes.c_int
+            nvml.nvmlDeviceGetTemperature.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)]
+            nvml.nvmlDeviceGetTemperature.restype = ctypes.c_int
+            nvml.nvmlDeviceGetName.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
+            nvml.nvmlDeviceGetName.restype = ctypes.c_int
+
+            if nvml.nvmlInit_v2() != 0:
+                return False
+            dev = ctypes.c_void_p()
+            if nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) != 0:
+                nvml.nvmlShutdown()
+                return False
+
+            name_buf = ctypes.create_string_buffer(96)
+            if nvml.nvmlDeviceGetName(dev, name_buf, len(name_buf)) == 0:
+                self.gpu_name = name_buf.value.decode("utf-8", errors="replace").strip() or "NVIDIA GPU"
+            else:
+                self.gpu_name = "NVIDIA GPU"
+
+            self._nvml = nvml
+            self._nvml_dev = dev
+            self.backend = "nvml"
+            return True
+        except (OSError, AttributeError):
+            return False
+
+    def _try_init_pdh(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            pdh = ctypes.WinDLL("pdh.dll")
+            pdh.PdhOpenQueryW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+            pdh.PdhOpenQueryW.restype = ctypes.c_uint32
+            pdh.PdhAddEnglishCounterW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            pdh.PdhAddEnglishCounterW.restype = ctypes.c_uint32
+            pdh.PdhCollectQueryData.argtypes = [ctypes.c_void_p]
+            pdh.PdhCollectQueryData.restype = ctypes.c_uint32
+            pdh.PdhGetFormattedCounterArrayW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.c_void_p,
+            ]
+            pdh.PdhGetFormattedCounterArrayW.restype = ctypes.c_uint32
+            pdh.PdhCloseQuery.argtypes = [ctypes.c_void_p]
+            pdh.PdhCloseQuery.restype = ctypes.c_uint32
+
+            query = ctypes.c_void_p()
+            if pdh.PdhOpenQueryW(None, None, ctypes.byref(query)) != 0:
+                return False
+
+            counter = ctypes.c_void_p()
+            status = pdh.PdhAddEnglishCounterW(
+                query,
+                r"\GPU Engine(*)\Utilization Percentage",
+                None,
+                ctypes.byref(counter),
+            )
+            if status != 0:
+                pdh.PdhCloseQuery(query)
+                return False
+
+            # Primeira coleta inicializa a janela de amostragem do contador
+            pdh.PdhCollectQueryData(query)
+            self._pdh = pdh
+            self._pdh_query = query
+            self._pdh_counter = counter
+            self.backend = "pdh"
+            self.gpu_name = "Windows GPU (PDH)"
+            return True
+        except (OSError, AttributeError):
+            return False
+
+    def _read_pdh_sync(self) -> int:
+        if not self._pdh or not self._pdh_query or not self._pdh_counter:
+            return 0
+        try:
+            if self._pdh.PdhCollectQueryData(self._pdh_query) != 0:
+                return 0
+            PDH_FMT_DOUBLE = 0x00000200
+            PDH_MORE_DATA = 0x800007D2
+            buf_size = ctypes.c_uint32(0)
+            item_count = ctypes.c_uint32(0)
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                None,
+            )
+            if status != PDH_MORE_DATA or buf_size.value == 0:
+                return 0
+
+            raw_buf = (ctypes.c_byte * buf_size.value)()
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                ctypes.byref(raw_buf),
+            )
+            if status != 0 or item_count.value == 0:
+                return 0
+
+            items = ctypes.cast(raw_buf, ctypes.POINTER(_PdhFmtCounterValueItemW))
+            # Soma por tipo de engine (ex.: engtype_3D, engtype_VideoDecode) e pega o maior
+            by_engine: dict[str, float] = {}
+            for i in range(item_count.value):
+                item = items[i]
+                if item.FmtValue.CStatus != 0:
+                    continue
+                val = item.FmtValue.doubleValue
+                if val <= 0.0:
+                    continue
+                name = item.szName or ""
+                key = name.split("engtype_")[-1] if "engtype_" in name else "total"
+                by_engine[key] = by_engine.get(key, 0.0) + val
+
+            peak = max(by_engine.values(), default=0.0)
+            return int(round(max(0.0, min(100.0, peak))))
+        except (OSError, ValueError):
+            return 0
+
+    async def read_metrics(self) -> tuple[int, Optional[int]]:
+        """Retorna (gpu_percent, gpu_temp_celsius_ou_None)."""
+        if self.backend == "nvml" and self._nvml and self._nvml_dev:
+            pct = 0
+            temp_c: Optional[int] = None
+            try:
+                util = _NvmlUtilization()
+                if self._nvml.nvmlDeviceGetUtilizationRates(self._nvml_dev, ctypes.byref(util)) == 0:
+                    pct = int(max(0, min(100, util.gpu)))
+            except OSError:
+                pass
+            try:
+                raw_temp = ctypes.c_uint(0)
+                # NVML_TEMPERATURE_GPU = 0
+                if self._nvml.nvmlDeviceGetTemperature(self._nvml_dev, 0, ctypes.byref(raw_temp)) == 0:
+                    if 0 < raw_temp.value < 150:
+                        temp_c = int(raw_temp.value)
+            except OSError:
+                pass
+            return pct, temp_c
+
+        if self.backend == "nvidia-smi" and self._nvidia_smi_path:
+            try:
+                creationflags = 0x08000000 if os.name == "nt" else 0
+                proc = await asyncio.create_subprocess_exec(
+                    self._nvidia_smi_path,
+                    "--query-gpu=utilization.gpu,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=creationflags,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1.0)
+                if proc.returncode == 0 and stdout:
+                    first_line = stdout.decode("utf-8", errors="replace").splitlines()[0].strip()
+                    parts = [p.strip() for p in first_line.split(",")]
+                    pct = int(round(max(0.0, min(100.0, float(parts[0]))))) if parts else 0
+                    temp_c = None
+                    if len(parts) >= 2:
+                        try:
+                            val = int(round(float(parts[1])))
+                            if 0 < val < 150:
+                                temp_c = val
+                        except ValueError:
+                            temp_c = None
+                    return pct, temp_c
+            except (OSError, asyncio.TimeoutError, ValueError, IndexError):
+                return 0, None
+            return 0, None
+
+        if self.backend == "pdh":
+            return self._read_pdh_sync(), None
+
+        return 0, None
+
+    async def read_percent(self) -> int:
+        pct, _ = await self.read_metrics()
+        return pct
+
+    def close(self) -> None:
+        if self._nvml is not None:
+            try:
+                self._nvml.nvmlShutdown()
+            except OSError:
+                pass
+            self._nvml = None
+            self._nvml_dev = None
+        if self._pdh is not None and self._pdh_query is not None:
+            try:
+                self._pdh.PdhCloseQuery(self._pdh_query)
+            except OSError:
+                pass
+            self._pdh = None
+            self._pdh_query = None
+            self._pdh_counter = None
+
+
+class CpuTempMonitor:
+    """Leitor leve de temperatura de CPU (°C) no Windows sem exigir privilégios de Admin.
+
+    Ordem de prioridade:
+      1. Windows PDH (\\Thermal Zone Information(*)\\Temperature) -> ~2 ms, sem elevação.
+      2. WMI (root\\LibreHardwareMonitor / root\\OpenHardwareMonitor / root\\wmi MSAcpi_ThermalZoneTemperature).
+      3. Fallback seguro -> None.
+    """
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._log = logger
+        self.backend = "none"
+        self._pdh = None
+        self._pdh_query = None
+        self._pdh_counter = None
+        self._wmi_service = None
+        self._wmi_mode = ""
+        self._init_backend()
+
+    def _init_backend(self) -> None:
+        if self._try_init_pdh():
+            return
+        if self._try_init_wmi():
+            return
+        self.backend = "none"
+
+    def _try_init_pdh(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            pdh = ctypes.WinDLL("pdh.dll")
+            pdh.PdhOpenQueryW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+            pdh.PdhOpenQueryW.restype = ctypes.c_uint32
+            pdh.PdhAddEnglishCounterW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            pdh.PdhAddEnglishCounterW.restype = ctypes.c_uint32
+            pdh.PdhCollectQueryData.argtypes = [ctypes.c_void_p]
+            pdh.PdhCollectQueryData.restype = ctypes.c_uint32
+            pdh.PdhGetFormattedCounterArrayW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.c_void_p,
+            ]
+            pdh.PdhGetFormattedCounterArrayW.restype = ctypes.c_uint32
+            pdh.PdhCloseQuery.argtypes = [ctypes.c_void_p]
+            pdh.PdhCloseQuery.restype = ctypes.c_uint32
+
+            query = ctypes.c_void_p()
+            if pdh.PdhOpenQueryW(None, None, ctypes.byref(query)) != 0:
+                return False
+
+            counter = ctypes.c_void_p()
+            status = pdh.PdhAddEnglishCounterW(
+                query,
+                r"\Thermal Zone Information(*)\Temperature",
+                None,
+                ctypes.byref(counter),
+            )
+            if status != 0:
+                pdh.PdhCloseQuery(query)
+                return False
+
+            self._pdh = pdh
+            self._pdh_query = query
+            self._pdh_counter = counter
+            # Valida se há ao menos uma zona térmica acessível
+            if self._read_pdh_temp() is not None:
+                self.backend = "pdh"
+                return True
+
+            pdh.PdhCloseQuery(query)
+            self._pdh = None
+            self._pdh_query = None
+            self._pdh_counter = None
+            return False
+        except (OSError, AttributeError):
+            return False
+
+    def _try_init_wmi(self) -> bool:
+        if os.name != "nt":
+            return False
+        try:
+            import comtypes.client
+
+            for ns, mode in (
+                ("winmgmts:\\\\.\\root\\LibreHardwareMonitor", "ohm"),
+                ("winmgmts:\\\\.\\root\\OpenHardwareMonitor", "ohm"),
+                ("winmgmts:\\\\.\\root\\wmi", "acpi"),
+            ):
+                try:
+                    svc = comtypes.client.GetObject(ns)
+                    self._wmi_service = svc
+                    self._wmi_mode = mode
+                    if self._read_wmi_temp() is not None:
+                        self.backend = f"wmi-{mode}"
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        self._wmi_service = None
+        self._wmi_mode = ""
+        return False
+
+    def _read_pdh_temp(self) -> Optional[int]:
+        if not self._pdh or not self._pdh_query or not self._pdh_counter:
+            return None
+        try:
+            if self._pdh.PdhCollectQueryData(self._pdh_query) != 0:
+                return None
+            PDH_FMT_DOUBLE = 0x00000200
+            PDH_MORE_DATA = 0x800007D2
+            buf_size = ctypes.c_uint32(0)
+            item_count = ctypes.c_uint32(0)
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                None,
+            )
+            if status != PDH_MORE_DATA or buf_size.value == 0:
+                return None
+
+            raw_buf = (ctypes.c_byte * buf_size.value)()
+            status = self._pdh.PdhGetFormattedCounterArrayW(
+                self._pdh_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                ctypes.byref(raw_buf),
+            )
+            if status != 0 or item_count.value == 0:
+                return None
+
+            items = ctypes.cast(raw_buf, ctypes.POINTER(_PdhFmtCounterValueItemW))
+            valid_c: list[float] = []
+            for i in range(item_count.value):
+                item = items[i]
+                if item.FmtValue.CStatus != 0:
+                    continue
+                val = item.FmtValue.doubleValue
+                # Thermal Zone Information retorna Kelvin (ex.: 318.0 -> 44.85 °C)
+                celsius = val - 273.15 if val > 150.0 else val
+                if 10.0 <= celsius <= 125.0:
+                    valid_c.append(celsius)
+            if not valid_c:
+                return None
+            return int(round(max(valid_c)))
+        except (OSError, ValueError):
+            return None
+
+    def _read_wmi_temp(self) -> Optional[int]:
+        if self._wmi_service is None:
+            return None
+        try:
+            if self._wmi_mode == "ohm":
+                sensors = self._wmi_service.ExecQuery(
+                    "SELECT Name, Value FROM Sensor WHERE SensorType='Temperature'"
+                )
+                cpu_vals: list[float] = []
+                for s in sensors:
+                    name = str(getattr(s, "Name", "") or "").lower()
+                    if "cpu" in name or "package" in name or "core" in name:
+                        val = float(getattr(s, "Value", 0.0) or 0.0)
+                        if 10.0 <= val <= 125.0:
+                            cpu_vals.append(val)
+                return int(round(max(cpu_vals))) if cpu_vals else None
+
+            if self._wmi_mode == "acpi":
+                zones = self._wmi_service.ExecQuery(
+                    "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"
+                )
+                vals: list[float] = []
+                for z in zones:
+                    raw = float(getattr(z, "CurrentTemperature", 0.0) or 0.0)
+                    celsius = (raw / 10.0) - 273.15
+                    if 10.0 <= celsius <= 125.0:
+                        vals.append(celsius)
+                return int(round(max(vals))) if vals else None
+        except Exception:
+            return None
+        return None
+
+    def read_temperature(self) -> Optional[int]:
+        if self.backend == "pdh":
+            return self._read_pdh_temp()
+        if self.backend.startswith("wmi-"):
+            return self._read_wmi_temp()
+        return None
+
+    def close(self) -> None:
+        if self._pdh is not None and self._pdh_query is not None:
+            try:
+                self._pdh.PdhCloseQuery(self._pdh_query)
+            except OSError:
+                pass
+            self._pdh = None
+            self._pdh_query = None
+            self._pdh_counter = None
+        self._wmi_service = None
+
+
 class _UdpDiscoveryProtocol(asyncio.DatagramProtocol):
     def __init__(self, future: asyncio.Future, logger: logging.Logger) -> None:
         self._future = future
@@ -184,23 +706,39 @@ class MiniDeckWiFiBridge:
         udp_port: int = DEFAULT_UDP_PORT,
         fixed_host: Optional[str] = None,
         fixed_port: int = DEFAULT_WS_PORT,
+        gsi_port: int = DEFAULT_CS2_GSI_PORT,
         verbose: bool = False,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.udp_port = udp_port
         self.fixed_host = fixed_host
         self.fixed_port = fixed_port
+        self.gsi_port = gsi_port
         self.verbose = verbose
         self.log = logger or _setup_logger(verbose)
 
         self._last_channels: dict[str, ChannelSnapshot] = {}
         self._last_mic_mute: Optional[bool] = None
+        self._last_media: Optional[MediaSnapshot] = None
+        self._media = MediaController()
         self._last_esp_write_ts: dict[str, float] = {}
         self._resolved_processes: dict[str, Optional[str]] = {
             "browser": None,
             "discord": None,
             "game": None,
         }
+        # Estado do servidor local CS2 GSI (C4 Timer)
+        self._active_ws = None
+        self._gsi_server: Optional[asyncio.AbstractServer] = None
+        self._c4_state: str = "idle"
+        self._c4_time_left: int = 0
+        self._c4_deadline: Optional[float] = None
+        self._c4_task: Optional[asyncio.Task] = None
+
+        # Inicializa o contador não-bloqueante de CPU do psutil e leitores térmicos/GPU
+        psutil.cpu_percent(interval=None)
+        self._gpu = GpuMonitor(self.log)
+        self._cpu_temp = CpuTempMonitor(self.log)
 
     # ------------------------------------------------------------------
     # Auto-Discovery UDP (porta 4210)
@@ -266,7 +804,24 @@ class MiniDeckWiFiBridge:
             | IGNORED_UTILITY_PROCESSES
         )
         candidates = [s for s in sessions if s.process_name.lower() not in excluded]
-        return candidates[0] if candidates else None
+        if not candidates:
+            return None
+
+        # 1. Prioridade máxima: jogos conhecidos (cs2.exe, TslGame.exe, WatchDogs*.exe, WARDOGS)
+        known = self._pick_session(candidates, KNOWN_GAME_CANDIDATES)
+        if known is not None:
+            return known
+
+        # 2. Qualquer outro jogo/aplicativo fora dos launchers (Steam/Epic/Ubisoft)
+        non_launchers = [
+            s for s in candidates if s.process_name.lower() not in LAUNCHER_FALLBACK_PROCESSES
+        ]
+        if non_launchers:
+            active_game = next((s for s in non_launchers if s.is_active), None)
+            return active_game if active_game is not None else non_launchers[0]
+
+        # 3. Fallback: launcher (ex.: steam.exe) caso nenhum jogo esteja aberto
+        return candidates[0]
 
     def _read_windows_state(
         self, audio: AudioController
@@ -276,9 +831,11 @@ class MiniDeckWiFiBridge:
         try:
             master_vol = audio.get_master_volume()
             master_mute = audio.get_master_mute()
-        except (RuntimeError, COMError, OSError):
+        except (COMError, Exception):
             audio.refresh_devices()
-            master_vol, master_mute = 100, False
+            prev_master = self._last_channels.get("master")
+            master_vol = prev_master.volume if prev_master else 100
+            master_mute = prev_master.muted if prev_master else False
 
         channels["master"] = ChannelSnapshot(
             volume=master_vol,
@@ -289,7 +846,7 @@ class MiniDeckWiFiBridge:
 
         try:
             sessions = audio.list_audio_sessions(active_only=False, group_by_app=True)
-        except (COMError, OSError):
+        except (COMError, Exception):
             audio.refresh_devices()
             sessions = []
 
@@ -354,13 +911,12 @@ class MiniDeckWiFiBridge:
                 process_name=None,
             )
 
-        mic_mute = False
-        if audio.has_microphone():
-            try:
+        mic_mute = self._last_mic_mute if self._last_mic_mute is not None else False
+        try:
+            if audio.has_microphone():
                 mic_mute = audio.get_mic_mute()
-            except (RuntimeError, COMError, OSError):
-                audio.refresh_devices()
-                mic_mute = False
+        except (COMError, Exception):
+            audio.refresh_devices()
 
         return channels, mic_mute
 
@@ -421,13 +977,527 @@ class MiniDeckWiFiBridge:
         self._last_channels = channels
         self._last_mic_mute = mic_mute
 
+    async def _sync_browser_channel(self, ws, audio: AudioController) -> None:
+        channels, _ = self._read_windows_state(audio)
+        snap = channels.get("browser")
+        if snap is None:
+            return
+        await self._send_json(ws, {"sync": "label", "target": "browser", "val": snap.label})
+        await self._send_json(ws, {"sync": "vol", "target": "browser", "val": snap.volume})
+        await self._send_json(ws, {"sync": "mute", "target": "browser", "val": snap.muted})
+        self._last_channels["browser"] = snap
+
+    async def _sync_game_channel(self, ws, audio: AudioController) -> None:
+        channels, _ = self._read_windows_state(audio)
+        snap = channels.get("game")
+        if snap is None:
+            return
+        await self._send_json(ws, {"sync": "label", "target": "game", "val": snap.label})
+        await self._send_json(ws, {"sync": "vol", "target": "game", "val": snap.volume})
+        await self._send_json(ws, {"sync": "mute", "target": "game", "val": snap.muted})
+        self._last_channels["game"] = snap
+
+    async def _sync_media_to_esp32(
+        self,
+        ws,
+        audio: Optional[AudioController] = None,
+        force: bool = False,
+    ) -> None:
+        snap = await self._media.get_current_media()
+        if force or self._last_media != snap:
+            await self._send_json(
+                ws,
+                {
+                    "sync": "media",
+                    "title": snap.title,
+                    "artist": snap.artist,
+                    "playing": snap.playing,
+                },
+            )
+            if audio is not None:
+                await self._sync_browser_channel(ws, audio)
+            if not force or self._last_media is None:
+                estado = "TOCANDO" if snap.playing else "PAUSADO"
+                self.log.info(
+                    "[Windows -> WiFi] Mídia (%s): %s - %s",
+                    estado,
+                    snap.title,
+                    snap.artist,
+                )
+            self._last_media = snap
+
+    async def _read_system_stats(self) -> dict:
+        cpu_pct = int(round(max(0.0, min(100.0, psutil.cpu_percent(interval=None)))))
+        cpu_temp = self._cpu_temp.read_temperature()
+        gpu_pct, gpu_temp = await self._gpu.read_metrics()
+        vm = psutil.virtual_memory()
+        ram_pct = int(round(max(0.0, min(100.0, vm.percent))))
+        gb = 1024.0 ** 3
+        ram_used = f"{vm.used / gb:.1f}"
+        ram_total = f"{vm.total / gb:.1f}"
+
+        disk_pct = -1
+        try:
+            disk_pct = int(round(max(0.0, min(100.0, psutil.disk_usage("C:\\").percent))))
+        except OSError:
+            disk_pct = -1
+
+        payload: dict = {
+            "sync": "stats",
+            "cpu": cpu_pct,
+            "cpu_temp": cpu_temp,
+            "gpu": gpu_pct,
+            "gpu_temp": gpu_temp,
+            "ram_pct": ram_pct,
+            "ram_used": ram_used,
+            "ram_total": ram_total,
+        }
+        if disk_pct >= 0:
+            payload["disk_pct"] = disk_pct
+        return payload
+
+    async def _sync_stats_to_esp32(self, ws, log_once: bool = False) -> None:
+        stats = await self._read_system_stats()
+        await self._send_json(ws, stats)
+        if log_once:
+            cpu_t = f" | {stats['cpu_temp']}°C" if stats.get("cpu_temp") else ""
+            gpu_t = f" | {stats['gpu_temp']}°C" if stats.get("gpu_temp") else ""
+            disk_str = f" | Disco C: {stats['disk_pct']}%" if "disk_pct" in stats else ""
+            self.log.info(
+                "  Hardware       -> CPU: %d%%%s | GPU: %d%%%s (%s) | RAM: %d%% (%s / %s GB)%s",
+                stats["cpu"],
+                cpu_t,
+                stats["gpu"],
+                gpu_t,
+                self._gpu.gpu_name,
+                stats["ram_pct"],
+                stats["ram_used"],
+                stats["ram_total"],
+                disk_str,
+            )
+
+    # ------------------------------------------------------------------
+    # Macros / Atalhos de Aplicativos e Servidor CS2 GSI (C4 Timer)
+    # ------------------------------------------------------------------
+
+    def _launch_windows_target(self, target: str) -> bool:
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(target)
+                return True
+        except OSError:
+            pass
+        try:
+            creationflags = 0x08000000 if os.name == "nt" else 0
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", target],
+                creationflags=creationflags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except OSError:
+            return False
+
+    def _execute_macro(self, action: str) -> bool:
+        action = action.strip().lower()
+        if action == "edge":
+            return self._launch_windows_target("msedge")
+        if action == "steam":
+            return self._launch_windows_target("steam://open/main")
+        if action == "discord":
+            if self._launch_windows_target("discord://"):
+                return True
+            local_app = os.environ.get("LOCALAPPDATA", "")
+            updater = Path(local_app) / "Discord" / "Update.exe"
+            if updater.exists():
+                try:
+                    creationflags = 0x08000000 if os.name == "nt" else 0
+                    subprocess.Popen(
+                        [str(updater), "--processStart", "Discord.exe"],
+                        creationflags=creationflags,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return True
+                except OSError:
+                    return False
+            return False
+        if action == "disney":
+            return bool(webbrowser.open("https://www.disneyplus.com"))
+        if action == "hbo":
+            return bool(webbrowser.open("https://www.max.com"))
+        if action == "cs2_c4":
+            return True
+        return False
+
+    @staticmethod
+    def _find_running_process(process_names: tuple[str, ...]) -> Optional[str]:
+        """Verifica via psutil se algum dos processos informados já está em execução."""
+        targets = {p.lower() for p in process_names}
+        for proc in psutil.process_iter(["name"]):
+            try:
+                name = proc.info.get("name")
+                if name and name.lower() in targets:
+                    return name
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return None
+
+    def _launch_game(self, game: str) -> tuple[bool, str, bool]:
+        """Inicia o jogo selecionado pelo Hub de Jogos apenas se não estiver em execução.
+
+        Retorna (ok, descricao, already_running).
+        """
+        game_id = game.strip().lower()
+        process_map: dict[str, tuple[str, ...]] = {
+            "cs2": ("cs2.exe",),
+            "pubg": ("tslgame.exe",),
+            "watchdogs": (
+                "watchdogs.exe",
+                "watchdogs2.exe",
+                "watchdogslegion.exe",
+                "wardogsclient-win64-shipping.exe",
+                "wardogs.exe",
+            ),
+        }
+
+        if game_id in process_map:
+            running = self._find_running_process(process_map[game_id])
+            if running:
+                return True, f"{running} já em execução", True
+
+        if game_id == "cs2":
+            return self._launch_windows_target("steam://rungameid/730"), "Counter-Strike 2 (Steam 730)", False
+        if game_id == "pubg":
+            return self._launch_windows_target("steam://rungameid/578080"), "PUBG: BATTLEGROUNDS (Steam 578080)", False
+        if game_id == "watchdogs":
+            # Procura primeiro por atalho Watch Dogs no Desktop; depois WARDOGS (Steam 1867240) ou Ubisoft Connect
+            desktop_dirs = [
+                Path(os.environ.get("USERPROFILE", "")) / "Desktop",
+                Path(os.environ.get("PUBLIC", "C:\\Users\\Public")) / "Desktop",
+            ]
+            for d in desktop_dirs:
+                if not d.exists():
+                    continue
+                for entry in d.iterdir():
+                    low = entry.name.lower()
+                    if low.endswith((".lnk", ".url")) and ("watch dogs" in low or "watch_dogs" in low):
+                        return self._launch_windows_target(str(entry)), entry.name, False
+            # Fallback para WARDOGS instalado via Steam (AppID 1867240) ou Ubisoft Connect
+            steam_wardogs = Path("C:/Program Files (x86)/Steam/steamapps/appmanifest_1867240.acf")
+            if steam_wardogs.exists():
+                return self._launch_windows_target("steam://rungameid/1867240"), "WARDOGS (Steam 1867240)", False
+            if self._launch_windows_target("uplay://"):
+                return True, "Ubisoft Connect", False
+            return self._launch_windows_target("steam://open/games"), "Steam Biblioteca", False
+        if game_id == "custom":
+            return self._launch_windows_target("steam://open/games"), "Steam Biblioteca (Outros)", False
+        return False, game_id, False
+
+    async def _sync_cs2_c4_to_esp32(self, ws=None) -> None:
+        target_ws = ws if ws is not None else self._active_ws
+        if target_ws is None:
+            return
+        payload = {
+            "sync": "cs2_c4",
+            "state": self._c4_state,
+            "time_left": self._c4_time_left if self._c4_state == "planted" else 0,
+        }
+        try:
+            await self._send_json(target_ws, payload)
+        except (WebSocketException, OSError):
+            pass
+
+    @staticmethod
+    def _enable_tcp_nodelay(transport) -> bool:
+        if transport is None:
+            return False
+        try:
+            sock = transport.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                return True
+        except OSError:
+            pass
+        return False
+
+    async def _cs2_c4_countdown_loop(self, skip_initial_send: bool = False) -> None:
+        try:
+            first_tick = True
+            while self._c4_state == "planted" and self._c4_deadline is not None:
+                remaining = int(round(max(0.0, self._c4_deadline - time.monotonic())))
+                self._c4_time_left = remaining
+                if not (first_tick and skip_initial_send):
+                    await self._sync_cs2_c4_to_esp32()
+                first_tick = False
+                if remaining <= 0:
+                    break
+                # Sincroniza o próximo tick exatamente no próximo segundo inteiro
+                next_target = self._c4_deadline - (remaining - 1)
+                sleep_s = max(0.05, min(1.0, next_target - time.monotonic()))
+                await asyncio.sleep(sleep_s)
+        except asyncio.CancelledError:
+            return
+
+        if self._c4_state == "planted":
+            self._c4_state = "idle"
+            self._c4_time_left = 0
+            self._c4_deadline = None
+            self.log.info("[CS2 GSI] Contagem da C4 finalizada -> idle.")
+            await self._sync_cs2_c4_to_esp32()
+
+    async def _start_cs2_c4_timer(self, initial_seconds: float = CS2_C4_TOTAL_SECONDS) -> None:
+        clamped = max(1.0, min(60.0, float(initial_seconds)))
+        if self._c4_state == "planted" and self._c4_task and not self._c4_task.done():
+            return
+        self._c4_state = "planted"
+        self._c4_deadline = time.monotonic() + clamped
+        self._c4_time_left = int(round(clamped))
+        self.log.info("[CS2 GSI] BOMBA PLANTADA! Iniciando contador regressivo (%ds).", self._c4_time_left)
+        # Dispara imediatamente o primeiro frame via WebSocket na mesma corrotina (zero atraso)
+        await self._sync_cs2_c4_to_esp32()
+        if self._c4_task and not self._c4_task.done():
+            self._c4_task.cancel()
+        self._c4_task = asyncio.create_task(self._cs2_c4_countdown_loop(skip_initial_send=True))
+
+    async def _stop_cs2_c4_timer(self, reason: str) -> None:
+        was_active = self._c4_state != "idle" or (self._c4_task is not None and not self._c4_task.done())
+        if self._c4_task and not self._c4_task.done():
+            self._c4_task.cancel()
+        self._c4_task = None
+        self._c4_state = "idle"
+        self._c4_time_left = 0
+        self._c4_deadline = None
+        if was_active:
+            self.log.info("[CS2 GSI] C4 encerrada (%s) -> idle.", reason)
+            await self._sync_cs2_c4_to_esp32()
+
+    async def _handle_cs2_gsi_payload(self, payload: dict) -> None:
+        round_info = payload.get("round")
+        bomb_info = payload.get("bomb")
+        round_bomb = ""
+        round_phase = ""
+        bomb_state = ""
+
+        if isinstance(round_info, dict):
+            round_bomb = str(round_info.get("bomb", "")).strip().lower()
+            round_phase = str(round_info.get("phase", "")).strip().lower()
+
+        if isinstance(bomb_info, dict):
+            bomb_state = str(bomb_info.get("state", "")).strip().lower()
+
+        self.log.info(
+            "[CS2 GSI] Payload recebido do CS2: bomb_state=%s | round_bomb=%s | round_phase=%s",
+            bomb_state or "-",
+            round_bomb or "-",
+            round_phase or "-",
+        )
+
+        if bomb_state in ("defused", "exploded") or round_bomb in ("defused", "exploded"):
+            reason = bomb_state if bomb_state in ("defused", "exploded") else round_bomb
+            await self._stop_cs2_c4_timer(reason)
+            return
+
+        if round_phase in ("over", "freezetime"):
+            await self._stop_cs2_c4_timer(round_phase)
+            return
+
+        if bomb_state in ("planted", "planting") or round_bomb == "planted":
+            countdown = float(CS2_C4_TOTAL_SECONDS)
+            if isinstance(bomb_info, dict) and bomb_info.get("countdown") is not None:
+                try:
+                    countdown = float(bomb_info["countdown"])
+                except (TypeError, ValueError):
+                    countdown = float(CS2_C4_TOTAL_SECONDS)
+            await self._start_cs2_c4_timer(countdown)
+
+    async def _handle_gsi_http_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        self._enable_tcp_nodelay(writer.transport)
+        try:
+            raw_headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=3.0)
+            header_text = raw_headers.decode("iso-8859-1", errors="replace")
+            content_length = 0
+            expect_continue = False
+            is_chunked = False
+
+            for line in header_text.split("\r\n")[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    key = k.strip().lower()
+                    val = v.strip()
+                    if key == "content-length":
+                        try:
+                            content_length = max(0, min(512 * 1024, int(val)))
+                        except ValueError:
+                            content_length = 0
+                    elif key == "expect" and "100-continue" in val.lower():
+                        expect_continue = True
+                    elif key == "transfer-encoding" and "chunked" in val.lower():
+                        is_chunked = True
+
+            # CS2 (libcurl) pode enviar Expect: 100-continue em payloads > 1 KB
+            if expect_continue:
+                writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+                await writer.drain()
+
+            body = b""
+            if is_chunked:
+                chunks: list[bytes] = []
+                total_len = 0
+                while total_len < 512 * 1024:
+                    size_line = await asyncio.wait_for(reader.readline(), timeout=3.0)
+                    if not size_line:
+                        break
+                    chunk_size = int(size_line.split(b";", 1)[0].strip(), 16)
+                    if chunk_size <= 0:
+                        await asyncio.wait_for(reader.readexactly(2), timeout=2.0)
+                        break
+                    chunk_data = await asyncio.wait_for(reader.readexactly(chunk_size), timeout=3.0)
+                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0)
+                    chunks.append(chunk_data)
+                    total_len += chunk_size
+                body = b"".join(chunks)
+            elif content_length > 0:
+                body = await asyncio.wait_for(reader.readexactly(content_length), timeout=3.0)
+
+            # Dispara o processamento/WebSocket imediatamente antes de encerrar a conexão HTTP
+            if body:
+                try:
+                    payload = json.loads(body.decode("utf-8", errors="replace"))
+                    if isinstance(payload, dict):
+                        await self._handle_cs2_gsi_payload(payload)
+                except json.JSONDecodeError:
+                    self.log.warning("[CS2 GSI] Payload JSON inválido recebido na porta %d.", self.gsi_port)
+
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: 2\r\n"
+                b"Connection: close\r\n\r\nOK"
+            )
+            await writer.drain()
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except OSError:
+                pass
+
+    async def _start_cs2_gsi_server(self) -> None:
+        if self._gsi_server is not None or self.gsi_port <= 0:
+            return
+        try:
+            self._gsi_server = await asyncio.start_server(
+                self._handle_gsi_http_client,
+                host="127.0.0.1",
+                port=self.gsi_port,
+            )
+            self.log.info("CS2 GSI      : http://127.0.0.1:%d (escutando C4)", self.gsi_port)
+        except OSError as exc:
+            self.log.warning(
+                "CS2 GSI      : porta %d indisponível (%s) — timer C4 desativado nesta instância.",
+                self.gsi_port,
+                exc,
+            )
+            self._gsi_server = None
+
+    async def _stop_cs2_gsi_server(self) -> None:
+        if self._c4_task and not self._c4_task.done():
+            self._c4_task.cancel()
+            try:
+                await self._c4_task
+            except asyncio.CancelledError:
+                pass
+        self._c4_task = None
+        if self._gsi_server is not None:
+            self._gsi_server.close()
+            try:
+                await self._gsi_server.wait_closed()
+            except OSError:
+                pass
+            self._gsi_server = None
+
     # ------------------------------------------------------------------
     # Aplicação de Eventos ESP32 -> Windows
     # ------------------------------------------------------------------
 
     async def _handle_esp_event(self, ws, audio: AudioController, msg: dict) -> None:
+        cmd = str(msg.get("cmd", "")).lower()
         event = str(msg.get("event", "")).lower()
         target = str(msg.get("target", "")).lower()
+
+        if cmd == "media":
+            action = str(msg.get("action", "")).lower()
+            if action in ("play_pause", "next", "prev"):
+                ok = await self._media.handle_action(action)
+                self.log.info(
+                    "[ESP32 WiFi -> Windows] Comando de mídia '%s' -> %s",
+                    action,
+                    "OK" if ok else "FALHA",
+                )
+                await asyncio.sleep(0.15)
+                await self._sync_media_to_esp32(ws, audio=audio, force=True)
+            return
+
+        if cmd == "macro":
+            action = str(msg.get("action", "")).lower()
+            ok = self._execute_macro(action)
+            self.log.info(
+                "[ESP32 WiFi -> Windows] Atalho '%s' -> %s",
+                action,
+                "OK" if ok else "FALHA",
+            )
+            if action == "cs2_c4":
+                await self._sync_cs2_c4_to_esp32(ws)
+            return
+
+        if cmd == "launch_game":
+            game = str(msg.get("game", "")).lower()
+            ok, label, already_running = self._launch_game(game)
+            if already_running:
+                self.log.info(
+                    "[ESP32 WiFi -> Windows] Hub de Jogos '%s': %s -> sincronizando HUD/volume sem reabrir.",
+                    game,
+                    label,
+                )
+            else:
+                self.log.info(
+                    "[ESP32 WiFi -> Windows] Hub de Jogos '%s' (%s) -> %s",
+                    game,
+                    label,
+                    "OK" if ok else "FALHA",
+                )
+            if game == "cs2":
+                await self._start_cs2_gsi_server()
+                await self._sync_cs2_c4_to_esp32(ws)
+            await self._sync_game_channel(ws, audio)
+            await self._sync_stats_to_esp32(ws, log_once=False)
+            return
+
+        if event == "screen":
+            screen = str(msg.get("screen", "")).lower()
+            if screen == "media":
+                self.log.info("[ESP32 WiFi] Tela Mídia aberta -> sincronizando Edge e Now Playing...")
+                await self._sync_browser_channel(ws, audio)
+                await self._sync_media_to_esp32(ws, audio=None, force=True)
+            elif screen == "hardware":
+                self.log.info("[ESP32 WiFi] Tela Hardware aberta -> enviando telemetria CPU/RAM/GPU...")
+                await self._sync_stats_to_esp32(ws, log_once=False)
+            elif screen == "game_hud":
+                self.log.info("[ESP32 WiFi] Game HUD aberto -> sincronizando Volume do Jogo, Hardware e CS2 C4...")
+                await self._sync_game_channel(ws, audio)
+                await self._sync_stats_to_esp32(ws, log_once=False)
+                await self._sync_cs2_c4_to_esp32(ws)
+            elif screen == "macros":
+                self.log.info("[ESP32 WiFi] Tela Atalhos aberta.")
+            return
 
         if event == "pong":
             return
@@ -435,6 +1505,9 @@ class MiniDeckWiFiBridge:
         if event == "ready":
             self.log.info("[ESP32 WiFi] Placa pronta -> enviando sincronização completa...")
             await self._sync_to_esp32(ws, audio, force_all=True)
+            await self._sync_media_to_esp32(ws, audio=None, force=True)
+            await self._sync_stats_to_esp32(ws, log_once=False)
+            await self._sync_cs2_c4_to_esp32(ws)
             return
 
         if event == "set_vol" and target:
@@ -446,15 +1519,63 @@ class MiniDeckWiFiBridge:
             self._last_esp_write_ts[target] = time.monotonic()
 
             if target == "master":
-                applied = audio.set_master_volume(val)
+                try:
+                    applied = audio.set_master_volume(val)
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao ajustar Master (%s). Recarregando dispositivos...",
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        applied = audio.set_master_volume(val)
+                        self.log.info(
+                            "[Audio Hot-Plug] Reconectado ao dispositivo padrão: %s",
+                            audio.get_master_device_name() or "N/A",
+                        )
+                    except (COMError, Exception) as retry_exc:
+                        self.log.warning(
+                            "[Audio Hot-Plug] Saída padrão temporariamente indisponível (%s).",
+                            retry_exc,
+                        )
+                        return
+
                 if "master" in self._last_channels:
                     self._last_channels["master"].volume = applied
                 self.log.info("[ESP32 WiFi -> Windows] Master volume = %d%%", applied)
                 return
 
             proc_name = self._resolved_processes.get(target)
+            if not proc_name and target == "game":
+                self._read_windows_state(audio)
+                proc_name = self._resolved_processes.get(target)
+
             if proc_name:
-                ok = audio.set_app_volume(proc_name, val)
+                try:
+                    ok = audio.set_app_volume(proc_name, val)
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao ajustar volume de '%s' (%s). Recarregando dispositivos...",
+                        proc_name,
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        ok = audio.set_app_volume(proc_name, val)
+                    except (COMError, Exception):
+                        ok = False
+
+                if not ok and target == "game":
+                    # Jogo pode ter acabado de abrir/trocar de processo -> reescaneia sessões
+                    self._read_windows_state(audio)
+                    new_proc = self._resolved_processes.get(target)
+                    if new_proc and new_proc != proc_name:
+                        proc_name = new_proc
+                        try:
+                            ok = audio.set_app_volume(proc_name, val)
+                        except (COMError, Exception):
+                            ok = False
+
                 if ok and target in self._last_channels:
                     self._last_channels[target].volume = val
                     self.log.info(
@@ -482,7 +1603,27 @@ class MiniDeckWiFiBridge:
             self._last_esp_write_ts[target] = time.monotonic()
 
             if target == "master":
-                new_state = audio.toggle_master_mute()
+                try:
+                    new_state = audio.toggle_master_mute()
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao alternar mute Master (%s). Recarregando dispositivos...",
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        new_state = audio.toggle_master_mute()
+                        self.log.info(
+                            "[Audio Hot-Plug] Reconectado ao dispositivo padrão: %s",
+                            audio.get_master_device_name() or "N/A",
+                        )
+                    except (COMError, Exception) as retry_exc:
+                        self.log.warning(
+                            "[Audio Hot-Plug] Saída padrão temporariamente indisponível (%s).",
+                            retry_exc,
+                        )
+                        return
+
                 if "master" in self._last_channels:
                     self._last_channels["master"].muted = new_state
                 await self._send_json(ws, {"sync": "mute", "target": "master", "val": new_state})
@@ -493,10 +1634,32 @@ class MiniDeckWiFiBridge:
                 return
 
             if target == "mic":
-                if not audio.has_microphone():
-                    self.log.warning("[ESP32 WiFi -> Windows] Nenhum microfone padrão detectado.")
-                    return
-                new_state = audio.toggle_mic_mute()
+                try:
+                    if not audio.has_microphone():
+                        self.log.warning("[ESP32 WiFi -> Windows] Nenhum microfone padrão detectado.")
+                        return
+                    new_state = audio.toggle_mic_mute()
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao alternar Microfone (%s). Recarregando dispositivos...",
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        if not audio.has_microphone():
+                            return
+                        new_state = audio.toggle_mic_mute()
+                        self.log.info(
+                            "[Audio Hot-Plug] Microfone reconectado: %s",
+                            audio.get_mic_device_name() or "N/A",
+                        )
+                    except (COMError, Exception) as retry_exc:
+                        self.log.warning(
+                            "[Audio Hot-Plug] Microfone temporariamente indisponível (%s).",
+                            retry_exc,
+                        )
+                        return
+
                 self._last_mic_mute = new_state
                 await self._send_json(ws, {"sync": "mute", "target": "mic", "val": new_state})
                 self.log.info(
@@ -507,7 +1670,20 @@ class MiniDeckWiFiBridge:
 
             proc_name = self._resolved_processes.get(target)
             if proc_name:
-                new_state = audio.toggle_app_mute(proc_name)
+                try:
+                    new_state = audio.toggle_app_mute(proc_name)
+                except (COMError, Exception) as exc:
+                    self.log.warning(
+                        "[Audio Hot-Plug] Falha ao alternar mute de '%s' (%s). Recarregando dispositivos...",
+                        proc_name,
+                        exc,
+                    )
+                    audio.refresh_devices()
+                    try:
+                        new_state = audio.toggle_app_mute(proc_name)
+                    except (COMError, Exception):
+                        new_state = None
+
                 if new_state is not None:
                     if target in self._last_channels:
                         self._last_channels[target].muted = new_state
@@ -533,7 +1709,13 @@ class MiniDeckWiFiBridge:
         audio: AudioController,
         deadline: Optional[float],
     ) -> None:
+        self._active_ws = ws
+        if self._enable_tcp_nodelay(getattr(ws, "transport", None)):
+            self.log.info("  WebSocket      -> TCP_NODELAY ativo (baixa latência)")
         await self._sync_to_esp32(ws, audio, force_all=True)
+        await self._sync_media_to_esp32(ws, audio=audio, force=True)
+        await self._sync_stats_to_esp32(ws, log_once=True)
+        await self._sync_cs2_c4_to_esp32(ws)
 
         for target, snap in self._last_channels.items():
             proc_info = snap.process_name or "aguardando app"
@@ -572,11 +1754,17 @@ class MiniDeckWiFiBridge:
 
         async def poll_task() -> None:
             last_ping = time.monotonic()
+            tick_count = 0
             while True:
                 if deadline is not None and time.monotonic() >= deadline:
                     return
                 await asyncio.sleep(POLL_INTERVAL_S)
+                tick_count += 1
                 await self._sync_to_esp32(ws, audio, force_all=False)
+                if tick_count % 2 == 0:
+                    await self._sync_media_to_esp32(ws, audio=audio, force=False)
+                if tick_count % STATS_POLL_TICKS == 0:
+                    await self._sync_stats_to_esp32(ws, log_once=False)
                 now = time.monotonic()
                 if (now - last_ping) >= APP_PING_INTERVAL_S:
                     last_ping = now
@@ -597,6 +1785,7 @@ class MiniDeckWiFiBridge:
                 if exc is not None:
                     raise exc
         finally:
+            self._active_ws = None
             if not t_rx.done():
                 t_rx.cancel()
             if not t_poll.done():
@@ -610,59 +1799,66 @@ class MiniDeckWiFiBridge:
         deadline = (time.monotonic() + duration_seconds) if duration_seconds is not None else None
         last_endpoint: Optional[tuple[str, int]] = None
 
-        with AudioController() as audio:
-            self.log.info("Saída padrão : %s", audio.get_master_device_name() or "N/A")
-            self.log.info("Microfone    : %s", audio.get_mic_device_name() or "N/A")
+        try:
+            await self._start_cs2_gsi_server()
+            with AudioController() as audio:
+                self.log.info("Saída padrão : %s", audio.get_master_device_name() or "N/A")
+                self.log.info("Microfone    : %s", audio.get_mic_device_name() or "N/A")
+                self.log.info("GPU Monitor  : %s [%s]", self._gpu.gpu_name, self._gpu.backend)
+                self.log.info("CPU Temp     : backend [%s]", self._cpu_temp.backend)
 
-            while True:
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-
-                # 1. Descobre o IP do ESP32 via UDP 4210 (ou usa último IP conhecido / fixo)
-                if last_endpoint is None:
-                    remaining = (deadline - time.monotonic()) if deadline is not None else None
-                    if remaining is not None and remaining <= 0:
+                while True:
+                    if deadline is not None and time.monotonic() >= deadline:
                         break
-                    endpoint = await self.discover_device(timeout=remaining)
-                    if endpoint is None:
-                        break
-                else:
-                    endpoint = last_endpoint
 
-                ip, port = endpoint
-                uri = f"ws://{ip}:{port}"
-                self.log.info("Conectando via WebSocket em %s ...", uri)
-
-                try:
-                    async with websockets.connect(
-                        uri,
-                        open_timeout=4.0,
-                        ping_interval=3.0,
-                        ping_timeout=3.0,
-                        close_timeout=1.0,
-                    ) as ws:
-                        last_endpoint = endpoint
-                        self.log.info("Conectado com sucesso em %s!", uri)
-                        await self._run_ws_session(ws, audio, deadline)
-
-                        if deadline is not None and time.monotonic() >= deadline:
+                    # 1. Descobre o IP do ESP32 via UDP 4210 (ou usa último IP conhecido / fixo)
+                    if last_endpoint is None:
+                        remaining = (deadline - time.monotonic()) if deadline is not None else None
+                        if remaining is not None and remaining <= 0:
                             break
-                        self.log.warning("Conexão WebSocket encerrada pelo ESP32.")
-                except (WebSocketException, OSError, asyncio.TimeoutError) as exc:
-                    self.log.warning(
-                        "Falha/queda na conexão com %s (%s). Redescobrindo em %.0fs...",
-                        uri,
-                        exc,
-                        RECONNECT_DELAY_S,
-                    )
-                    # Limpa IP em cache se não for fixo, para acompanhar eventual mudança de DHCP
-                    if not self.fixed_host:
-                        last_endpoint = None
+                        endpoint = await self.discover_device(timeout=remaining)
+                        if endpoint is None:
+                            break
+                    else:
+                        endpoint = last_endpoint
 
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-                await asyncio.sleep(RECONNECT_DELAY_S)
+                    ip, port = endpoint
+                    uri = f"ws://{ip}:{port}"
+                    self.log.info("Conectando via WebSocket em %s ...", uri)
 
+                    try:
+                        async with websockets.connect(
+                            uri,
+                            open_timeout=4.0,
+                            ping_interval=3.0,
+                            ping_timeout=3.0,
+                            close_timeout=1.0,
+                        ) as ws:
+                            last_endpoint = endpoint
+                            self.log.info("Conectado com sucesso em %s!", uri)
+                            await self._run_ws_session(ws, audio, deadline)
+
+                            if deadline is not None and time.monotonic() >= deadline:
+                                break
+                            self.log.warning("Conexão WebSocket encerrada pelo ESP32.")
+                    except (WebSocketException, OSError, asyncio.TimeoutError) as exc:
+                        self.log.warning(
+                            "Falha/queda na conexão com %s (%s). Redescobrindo em %.0fs...",
+                            uri,
+                            exc,
+                            RECONNECT_DELAY_S,
+                        )
+                        # Limpa IP em cache se não for fixo, para acompanhar eventual mudança de DHCP
+                        if not self.fixed_host:
+                            last_endpoint = None
+
+                    if deadline is not None and time.monotonic() >= deadline:
+                        break
+                    await asyncio.sleep(RECONNECT_DELAY_S)
+        finally:
+            await self._stop_cs2_gsi_server()
+            self._gpu.close()
+            self._cpu_temp.close()
         self.log.info("Wi-Fi Bridge finalizada com segurança.")
 
 
@@ -686,6 +1882,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_WS_PORT,
         help=f"Porta WebSocket do ESP32 quando --host for usado (padrão: {DEFAULT_WS_PORT})",
+    )
+    parser.add_argument(
+        "--gsi-port",
+        type=int,
+        default=DEFAULT_CS2_GSI_PORT,
+        help=f"Porta HTTP local para CS2 Game State Integration (padrão: {DEFAULT_CS2_GSI_PORT}, 0 desativa)",
     )
     parser.add_argument("--verbose", action="store_true", help="Exibe todos os pacotes JSON TX/RX")
     parser.add_argument(
@@ -720,6 +1922,7 @@ def main() -> None:
         udp_port=args.udp_port,
         fixed_host=args.host,
         fixed_port=args.port,
+        gsi_port=args.gsi_port,
         verbose=args.verbose,
         logger=logger,
     )
