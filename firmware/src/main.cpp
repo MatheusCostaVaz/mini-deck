@@ -12,12 +12,11 @@
 
 #include "pins_config.h"
 #include "ui.h"
+#include "wifi_manager.h"
 
 // ============================================================================
-// Configuração Wi-Fi (com NVS), WebSocket, Auto-Discovery UDP e NTP (GMT-3)
+// Configuração NVS, Backlight PWM, WebSocket, Auto-Discovery UDP e NTP (GMT-3)
 // ============================================================================
-static constexpr const char *DEFAULT_WIFI_SSID = "WIFI 2.4";
-static constexpr const char *DEFAULT_WIFI_PASS = "Pass718293";
 static constexpr const char *NVS_NAMESPACE = "minideck";
 
 // Backlight PWM via LEDC (Guition JC3248W535C usa GFX_BL = GPIO 1)
@@ -96,9 +95,6 @@ static lv_indev_drv_t g_indev_drv;
 // Estado de Touch, Serial, WebSocket, Wi-Fi e NTP
 // ============================================================================
 static constexpr uint32_t SERIAL_HEARTBEAT_TIMEOUT_MS = 3000;
-static constexpr uint32_t WIFI_POLL_INTERVAL_MS = 500;
-static constexpr uint32_t WIFI_RSSI_POLL_INTERVAL_MS = 5000;
-static constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
 static constexpr uint32_t CLOCK_POLL_UNSYNCED_MS = 1000;
 static constexpr uint32_t CLOCK_POLL_SYNCED_MS = 10000;
 
@@ -113,27 +109,12 @@ static uint32_t g_last_serial_rx_ms = 0;
 static bool g_serial_pc_connected = false;
 
 static Preferences g_prefs;
-static String g_saved_ssid;
-static String g_saved_pass;
-static String g_pending_ssid;
-static String g_pending_pass;
-static bool g_wifi_trying_new = false;
-static bool g_wifi_restoring = false;
-static bool g_wifi_ever_connected = false;
-static bool g_boot_rescue_active = false;
-static uint32_t g_wifi_attempt_start_ms = 0;
-static int g_wifi_last_countdown_sec = -1;
-static bool g_wifi_scanning = false;
-static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 12000;
 
 static bool g_wifi_connected = false;
 static bool g_ws_started = false;
 static bool g_ws_client_connected = false;
 static bool g_ntp_synced = false;
 
-static uint32_t g_last_wifi_poll_ms = 0;
-static uint32_t g_last_rssi_poll_ms = 0;
-static uint32_t g_last_wifi_retry_ms = 0;
 static uint32_t g_last_udp_bcast_ms = 0;
 static uint32_t g_last_clock_poll_ms = 0;
 static char g_current_time_str[16] = "--:--";
@@ -574,6 +555,59 @@ static void handleIncomingMessage(String line, bool fromWifi, uint8_t wsClientNu
         }
         validMessage = true;
     }
+    else if (strcmp(syncType, "games_config") == 0)
+    {
+        JsonArray arr = doc["list"].as<JsonArray>();
+        if (!arr.isNull())
+        {
+            UiGameItem items[8];
+            int count = 0;
+            for (JsonVariant v : arr)
+            {
+                if (count >= 8) break;
+                const char *id = v["id"] | "";
+                const char *name = v["name"] | id;
+                if (id[0] == '\0') continue;
+                strncpy(items[count].id, id, sizeof(items[count].id) - 1);
+                items[count].id[sizeof(items[count].id) - 1] = '\0';
+                strncpy(items[count].name, name, sizeof(items[count].name) - 1);
+                items[count].name[sizeof(items[count].name) - 1] = '\0';
+                items[count].has_c4 = v["has_c4"] | false;
+                count++;
+            }
+            if (count > 0)
+            {
+                ui_sync_games_config(items, count);
+            }
+            validMessage = true;
+        }
+    }
+    else if (strcmp(syncType, "macros_config") == 0)
+    {
+        JsonArray arr = doc["list"].as<JsonArray>();
+        if (!arr.isNull())
+        {
+            UiMacroItem items[8];
+            int count = 0;
+            for (JsonVariant v : arr)
+            {
+                if (count >= 8) break;
+                const char *id = v["id"] | "";
+                const char *name = v["name"] | id;
+                if (id[0] == '\0') continue;
+                strncpy(items[count].id, id, sizeof(items[count].id) - 1);
+                items[count].id[sizeof(items[count].id) - 1] = '\0';
+                strncpy(items[count].name, name, sizeof(items[count].name) - 1);
+                items[count].name[sizeof(items[count].name) - 1] = '\0';
+                count++;
+            }
+            if (count > 0)
+            {
+                ui_sync_macros_config(items, count);
+            }
+            validMessage = true;
+        }
+    }
 
     if (validMessage)
     {
@@ -753,391 +787,31 @@ static void pollUdpDiscovery()
 }
 
 // ============================================================================
-// Wi-Fi em Segundo Plano (NVS + Fallback Seguro 12s + Scanner Assíncrono) e NTP
+// Callback do Gerenciador Multi-Wi-Fi e Relógio/Data NTP (GMT-3)
 // ============================================================================
-static void loadWifiCredentials()
+static void onWifiStateChanged(bool connected, const char *ssid, const char *ip_str, int32_t rssi)
 {
-    g_prefs.begin(NVS_NAMESPACE, true);
-    g_saved_ssid = g_prefs.getString("ssid", "");
-    g_saved_pass = g_prefs.getString("pass", "");
-    g_prefs.end();
+    (void)ssid;
+    (void)ip_str;
+    (void)rssi;
 
-    if (g_saved_ssid.isEmpty())
+    g_wifi_connected = connected;
+    if (connected)
     {
-        g_saved_ssid = DEFAULT_WIFI_SSID;
-        g_saved_pass = DEFAULT_WIFI_PASS;
+        configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+        startWebSocketServer();
+        g_last_udp_bcast_ms = millis() - UDP_BROADCAST_INTERVAL_MS;
+    }
+    else
+    {
+        g_ws_client_connected = false;
+        refreshConnectionBadge();
     }
 }
 
-static void saveWifiCredentialsToNvs(const String &ssid, const String &pass)
-{
-    g_prefs.begin(NVS_NAMESPACE, false);
-    g_prefs.putString("ssid", ssid);
-    g_prefs.putString("pass", pass);
-    g_prefs.end();
-}
-
-static void startWifiScan()
-{
-    WiFi.scanDelete();
-    g_wifi_scanning = true;
-    ui_set_wifi_scan_status("Escaneando redes...");
-
-    const int16_t res = WiFi.scanNetworks(true, false);
-    if (res == WIFI_SCAN_FAILED)
-    {
-        g_wifi_scanning = false;
-        ui_set_wifi_scan_status("Falha ao iniciar scan");
-        Serial.println("{\"event\":\"wifi_scan\",\"status\":\"failed\"}");
-        return;
-    }
-
-    Serial.println("{\"event\":\"wifi_scan\",\"status\":\"started\"}");
-}
-
-static void pollWifiScan()
-{
-    if (!g_wifi_scanning)
-    {
-        return;
-    }
-
-    const int16_t found = WiFi.scanComplete();
-    if (found == WIFI_SCAN_RUNNING)
-    {
-        return;
-    }
-
-    g_wifi_scanning = false;
-
-    if (found == WIFI_SCAN_FAILED || found < 0)
-    {
-        WiFi.scanDelete();
-        ui_set_wifi_scan_status("Falha ao escanear");
-        Serial.println("{\"event\":\"wifi_scan\",\"status\":\"failed\"}");
-        return;
-    }
-
-    static constexpr int MAX_NETS = 12;
-    UiWifiNetwork nets[MAX_NETS];
-    int count = 0;
-
-    for (int16_t i = 0; i < found; ++i)
-    {
-        String ssid = WiFi.SSID(i);
-        ssid.trim();
-        if (ssid.isEmpty())
-        {
-            continue;
-        }
-
-        const int32_t rssi = WiFi.RSSI(i);
-        const bool secured = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-
-        // Deduplica por SSID mantendo o sinal mais forte
-        int existingIdx = -1;
-        for (int j = 0; j < count; ++j)
-        {
-            if (strcmp(nets[j].ssid, ssid.c_str()) == 0)
-            {
-                existingIdx = j;
-                break;
-            }
-        }
-
-        if (existingIdx >= 0)
-        {
-            if (rssi > nets[existingIdx].rssi)
-            {
-                nets[existingIdx].rssi = rssi;
-                nets[existingIdx].secured = secured;
-            }
-            continue;
-        }
-
-        if (count < MAX_NETS)
-        {
-            strncpy(nets[count].ssid, ssid.c_str(), sizeof(nets[count].ssid) - 1);
-            nets[count].ssid[sizeof(nets[count].ssid) - 1] = '\0';
-            nets[count].rssi = rssi;
-            nets[count].secured = secured;
-            ++count;
-        }
-    }
-
-    // Ordena do sinal mais forte (RSSI mais alto) para o mais fraco
-    for (int i = 0; i < count; ++i)
-    {
-        for (int j = i + 1; j < count; ++j)
-        {
-            if (nets[j].rssi > nets[i].rssi)
-            {
-                UiWifiNetwork tmp = nets[i];
-                nets[i] = nets[j];
-                nets[j] = tmp;
-            }
-        }
-    }
-
-    WiFi.scanDelete();
-    ui_set_wifi_scan_results(nets, count);
-    Serial.printf("{\"event\":\"wifi_scan\",\"status\":\"done\",\"count\":%d}\n", count);
-}
-
-static void restoreSavedWifi(const char *reason)
-{
-    g_wifi_trying_new = false;
-    g_wifi_restoring = true;
-    g_pending_ssid = "";
-    g_pending_pass = "";
-    g_wifi_last_countdown_sec = -1;
-
-    g_wifi_connected = false;
-    g_ws_client_connected = false;
-    refreshConnectionBadge();
-    ui_set_wifi_status(false, nullptr, g_saved_ssid.c_str(), 0);
-    ui_set_wifi_scan_status("Falha ao conectar. Restaurando rede anterior...");
-
-    WiFi.disconnect(false);
-    delay(50);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(g_saved_ssid.c_str(), g_saved_pass.c_str());
-    WiFi.setSleep(false);
-
-    const uint32_t now = millis();
-    g_last_wifi_poll_ms = now;
-    g_last_wifi_retry_ms = now;
-
-    Serial.printf(
-        "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"fallback_restore\",\"reason\":\"%s\"}\n",
-        g_saved_ssid.c_str(),
-        reason ? reason : "timeout");
-}
-
-static void saveAndConnectWifi(const char *ssid, const char *pass)
-{
-    if (!ssid || ssid[0] == '\0')
-    {
-        return;
-    }
-
-    const char *safePass = pass ? pass : "";
-
-    // Mantém g_saved_ssid/g_saved_pass intactos como backup até confirmar WL_CONNECTED
-    g_pending_ssid = ssid;
-    g_pending_pass = safePass;
-    g_wifi_trying_new = true;
-    g_wifi_restoring = false;
-    g_wifi_attempt_start_ms = millis();
-    g_wifi_last_countdown_sec = static_cast<int>(WIFI_CONNECT_TIMEOUT_MS / 1000);
-
-    if (g_wifi_scanning)
-    {
-        WiFi.scanDelete();
-        g_wifi_scanning = false;
-    }
-
-    g_wifi_connected = false;
-    g_ws_client_connected = false;
-    refreshConnectionBadge();
-    ui_set_wifi_status(false, nullptr, g_pending_ssid.c_str(), 0);
-
-    char statusBuf[96];
-    snprintf(
-        statusBuf,
-        sizeof(statusBuf),
-        "Conectando a %s... (Tentativa de %ds)",
-        g_pending_ssid.c_str(),
-        g_wifi_last_countdown_sec);
-    ui_set_wifi_scan_status(statusBuf);
-
-    WiFi.disconnect(false);
-    delay(50);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(g_pending_ssid.c_str(), g_pending_pass.c_str());
-    WiFi.setSleep(false);
-
-    const uint32_t now = millis();
-    g_last_wifi_poll_ms = now;
-    g_last_wifi_retry_ms = now;
-
-    Serial.printf(
-        "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"trying_new\",\"timeout_s\":%d}\n",
-        g_pending_ssid.c_str(),
-        g_wifi_last_countdown_sec);
-}
-
-static void initWifiAsync()
-{
-    WiFi.mode(WIFI_STA);
-    WiFi.persistent(false);
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(g_saved_ssid.c_str(), g_saved_pass.c_str());
-    WiFi.setSleep(false);
-
-    ui_set_wifi_status(false, nullptr, g_saved_ssid.c_str(), 0);
-    configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
-    g_last_wifi_retry_ms = millis();
-
-    Serial.printf(
-        "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"connecting\"}\n",
-        g_saved_ssid.c_str());
-}
-
-static void pollWifiAndClock()
+static void pollClockNtp()
 {
     const uint32_t now = millis();
-
-    if ((now - g_last_wifi_poll_ms) >= WIFI_POLL_INTERVAL_MS)
-    {
-        g_last_wifi_poll_ms = now;
-        const wl_status_t wifiStatus = WiFi.status();
-        const bool isConnected = (wifiStatus == WL_CONNECTED);
-
-        if (g_wifi_trying_new)
-        {
-            const uint32_t elapsed = now - g_wifi_attempt_start_ms;
-            if (isConnected)
-            {
-                // Nova rede conectou com sucesso -> grava permanentemente na NVS
-                g_saved_ssid = g_pending_ssid;
-                g_saved_pass = g_pending_pass;
-                saveWifiCredentialsToNvs(g_saved_ssid, g_saved_pass);
-
-                g_wifi_trying_new = false;
-                g_wifi_restoring = false;
-                g_pending_ssid = "";
-                g_pending_pass = "";
-                g_wifi_last_countdown_sec = -1;
-
-                g_wifi_connected = true;
-                g_wifi_ever_connected = true;
-                g_boot_rescue_active = false;
-                WiFi.setSleep(false);
-                const String ipStr = WiFi.localIP().toString();
-                const String activeSsid = WiFi.SSID().length() > 0 ? WiFi.SSID() : g_saved_ssid;
-                const int32_t rssi = WiFi.RSSI();
-                ui_set_wifi_status(true, ipStr.c_str(), activeSsid.c_str(), rssi);
-                ui_set_wifi_scan_status("Conectado! Nova rede salva na memoria.");
-                g_last_rssi_poll_ms = now;
-
-                configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
-                startWebSocketServer();
-                g_last_udp_bcast_ms = now - UDP_BROADCAST_INTERVAL_MS;
-
-                Serial.printf(
-                    "{\"event\":\"wifi\",\"connected\":true,\"saved\":true,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%ld}\n",
-                    activeSsid.c_str(),
-                    ipStr.c_str(),
-                    static_cast<long>(rssi));
-            }
-            else if (elapsed >= WIFI_CONNECT_TIMEOUT_MS ||
-                     (wifiStatus == WL_CONNECT_FAILED && elapsed >= 3000))
-            {
-                restoreSavedWifi(elapsed >= WIFI_CONNECT_TIMEOUT_MS ? "timeout_12s" : "auth_failed");
-            }
-            else
-            {
-                const int remSec = static_cast<int>((WIFI_CONNECT_TIMEOUT_MS - elapsed + 999) / 1000);
-                if (remSec != g_wifi_last_countdown_sec)
-                {
-                    g_wifi_last_countdown_sec = remSec;
-                    char statusBuf[96];
-                    snprintf(
-                        statusBuf,
-                        sizeof(statusBuf),
-                        "Conectando a %s... (%ds)",
-                        g_pending_ssid.c_str(),
-                        remSec);
-                    ui_set_wifi_scan_status(statusBuf);
-                }
-            }
-        }
-        else if (isConnected && !g_wifi_connected)
-        {
-            g_wifi_connected = true;
-            g_wifi_ever_connected = true;
-            WiFi.setSleep(false);
-            const String ipStr = WiFi.localIP().toString();
-            const String activeSsid = WiFi.SSID().length() > 0 ? WiFi.SSID() : g_saved_ssid;
-            const int32_t rssi = WiFi.RSSI();
-            ui_set_wifi_status(true, ipStr.c_str(), activeSsid.c_str(), rssi);
-            if (g_boot_rescue_active)
-            {
-                g_boot_rescue_active = false;
-                g_saved_ssid = DEFAULT_WIFI_SSID;
-                g_saved_pass = DEFAULT_WIFI_PASS;
-                saveWifiCredentialsToNvs(g_saved_ssid, g_saved_pass);
-                ui_set_wifi_scan_status("Conectado! Rede padrao restaurada.");
-            }
-            else if (g_wifi_restoring)
-            {
-                g_wifi_restoring = false;
-                char restoredBuf[64];
-                snprintf(restoredBuf, sizeof(restoredBuf), "Rede anterior restaurada: %s", activeSsid.c_str());
-                ui_set_wifi_scan_status(restoredBuf);
-            }
-            else
-            {
-                ui_set_wifi_scan_status("Conectado!");
-            }
-            g_last_rssi_poll_ms = now;
-
-            configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
-            startWebSocketServer();
-
-            // Dispara o primeiro broadcast UDP imediatamente ao conectar no Wi-Fi
-            g_last_udp_bcast_ms = now - UDP_BROADCAST_INTERVAL_MS;
-
-            Serial.printf(
-                "{\"event\":\"wifi\",\"connected\":true,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%ld}\n",
-                activeSsid.c_str(),
-                ipStr.c_str(),
-                static_cast<long>(rssi));
-        }
-        else if (isConnected && g_wifi_connected && (now - g_last_rssi_poll_ms) >= WIFI_RSSI_POLL_INTERVAL_MS)
-        {
-            g_last_rssi_poll_ms = now;
-            const String ipStr = WiFi.localIP().toString();
-            const String activeSsid = WiFi.SSID().length() > 0 ? WiFi.SSID() : g_saved_ssid;
-            ui_set_wifi_status(true, ipStr.c_str(), activeSsid.c_str(), WiFi.RSSI());
-        }
-        else if (!isConnected && g_wifi_connected)
-        {
-            g_wifi_connected = false;
-            g_ws_client_connected = false;
-            ui_set_wifi_status(false, nullptr, g_saved_ssid.c_str(), 0);
-            refreshConnectionBadge();
-            Serial.println("{\"event\":\"wifi\",\"connected\":false,\"msg\":\"disconnected\"}");
-        }
-        else if (!isConnected && !g_wifi_scanning && !g_wifi_ever_connected &&
-                 !g_boot_rescue_active && !g_saved_ssid.equals(DEFAULT_WIFI_SSID) &&
-                 (now - g_last_wifi_retry_ms) >= WIFI_CONNECT_TIMEOUT_MS)
-        {
-            // Se a rede salva na NVS não conectar no boot em 12s, resgata automaticamente a rede padrão
-            g_boot_rescue_active = true;
-            g_last_wifi_retry_ms = now;
-            ui_set_wifi_status(false, nullptr, DEFAULT_WIFI_SSID, 0);
-            ui_set_wifi_scan_status("Falha na rede salva. Restaurando WIFI 2.4...");
-            WiFi.disconnect(false);
-            delay(50);
-            WiFi.mode(WIFI_STA);
-            WiFi.begin(DEFAULT_WIFI_SSID, DEFAULT_WIFI_PASS);
-            WiFi.setSleep(false);
-            Serial.printf(
-                "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"boot_rescue_default\"}\n",
-                DEFAULT_WIFI_SSID);
-        }
-        else if (!isConnected && !g_wifi_scanning && (now - g_last_wifi_retry_ms) >= WIFI_RETRY_INTERVAL_MS)
-        {
-            g_last_wifi_retry_ms = now;
-            const String &retrySsid = g_boot_rescue_active ? String(DEFAULT_WIFI_SSID) : g_saved_ssid;
-            const String &retryPass = g_boot_rescue_active ? String(DEFAULT_WIFI_PASS) : g_saved_pass;
-            WiFi.begin(retrySsid.c_str(), retryPass.c_str());
-            WiFi.setSleep(false);
-        }
-    }
-
     const uint32_t clockInterval = g_ntp_synced ? CLOCK_POLL_SYNCED_MS : CLOCK_POLL_UNSYNCED_MS;
     if ((now - g_last_clock_poll_ms) >= clockInterval)
     {
@@ -1388,7 +1062,6 @@ void setup()
     g_indev_drv.read_cb = my_touch_read;
     lv_indev_drv_register(&g_indev_drv);
 
-    loadWifiCredentials();
     loadStandbySetting();
     g_last_user_touch_ms = millis();
 
@@ -1400,8 +1073,8 @@ void setup()
         sendMacroAction,
         sendLaunchGame,
         sendTogglePcBluetooth,
-        startWifiScan,
-        saveAndConnectWifi);
+        wifi_mgr_start_manual_scan,
+        wifi_mgr_connect_new);
     ui_set_system_metrics(
         ESP.getFreeHeap() / 1024U,
         ESP.getFreePsram() / 1024U,
@@ -1409,15 +1082,16 @@ void setup()
         "");
     lv_timer_handler();
 
-    initWifiAsync();
+    wifi_mgr_init(onWifiStateChanged);
 
     Serial.printf(
-        "{\"event\":\"ready\",\"display\":\"%dx%d\",\"touch\":%s,\"ws_port\":%u,\"udp_port\":%u,\"psram_free\":%u}\n",
+        "{\"event\":\"ready\",\"display\":\"%dx%d\",\"touch\":%s,\"ws_port\":%u,\"udp_port\":%u,\"saved_wifi\":%d,\"psram_free\":%u}\n",
         gfx->width(),
         gfx->height(),
         g_touch_ready ? "true" : "false",
         static_cast<unsigned>(WS_PORT),
         static_cast<unsigned>(UDP_DISCOVERY_PORT),
+        wifi_mgr_saved_count(),
         static_cast<unsigned>(ESP.getFreePsram()));
 }
 
@@ -1429,8 +1103,8 @@ void loop()
         webSocket.loop();
     }
     checkSerialHeartbeatTimeout();
-    pollWifiAndClock();
-    pollWifiScan();
+    wifi_mgr_poll();
+    pollClockNtp();
     pollSystemMetricsAndStandby();
     pollUdpDiscovery();
     lv_timer_handler();

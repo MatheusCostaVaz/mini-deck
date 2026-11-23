@@ -730,59 +730,81 @@ void macro_btn_cb(lv_event_t *e)
     }
 }
 
-struct GameCardDef {
-    const char *id;
-    const char *title;
-    const char *hud_title;
-    const char *subtitle;
+constexpr int MAX_DYNAMIC_GAMES  = 8;
+constexpr int MAX_DYNAMIC_MACROS = 8;
+
+lv_obj_t *g_macros_grid = nullptr;
+lv_obj_t *g_games_grid  = nullptr;
+
+UiGameItem  g_dyn_games[MAX_DYNAMIC_GAMES];
+int         g_dyn_games_count = 0;
+UiMacroItem g_dyn_macros[MAX_DYNAMIC_MACROS];
+int         g_dyn_macros_count = 0;
+
+struct DynamicCardVisual {
     const char *icon_utf8;
     uint32_t accent_hex;
     uint32_t press_bg_hex;
-    bool is_cs2;
-
-    GameCardDef(
-        const char *i,
-        const char *t,
-        const char *ht,
-        const char *sub,
-        const char *ic,
-        uint32_t acc,
-        uint32_t pbg,
-        bool cs2)
-        : id(i),
-          title(t),
-          hud_title(ht),
-          subtitle(sub),
-          icon_utf8(ic),
-          accent_hex(acc),
-          press_bg_hex(pbg),
-          is_cs2(cs2) {}
+    const char *subtitle;
 };
 
-const GameCardDef g_game_cards[4] = {
-    GameCardDef("cs2",       "CS2",        "CS2",        "GSI C4 + HUD",  PH_ICN_CROSSHAIR, 0xF59E0B, 0x3B2308, true),
-    GameCardDef("pubg",      "PUBG",       "PUBG",       "BATTLEGROUNDS", PH_ICN_GAME,      0x38BDF8, 0x0A2A43, false),
-    GameCardDef("watchdogs", "WATCH DOGS", "WATCH DOGS", "GAME HUD",      PH_ICN_FIRE,      0xA855F7, 0x2E1065, false),
-    GameCardDef("custom",    "OUTROS",     "GAME HUD",   "BIBLIOTECA",    PH_ICN_APP,       0x34D399, 0x064E3B, false),
-};
-
-void configure_game_hud(const GameCardDef &game)
+DynamicCardVisual resolve_game_visual(const UiGameItem &game, int idx)
 {
-    g_hud_cs2_mode = game.is_cs2;
+    if (game.has_c4 || strcasecmp(game.id, "cs2") == 0)
+    {
+        return {PH_ICN_CROSSHAIR, 0xF59E0B, 0x3B2308, "GSI C4 + HUD"};
+    }
+    if (strcasecmp(game.id, "pubg") == 0)
+    {
+        return {PH_ICN_GAME, 0x38BDF8, 0x0A2A43, "BATTLEGROUNDS"};
+    }
+    if (strcasecmp(game.id, "watchdogs") == 0)
+    {
+        return {PH_ICN_FIRE, 0xA855F7, 0x2E1065, "GAME HUD"};
+    }
+    if (strcasecmp(game.id, "custom") == 0)
+    {
+        return {PH_ICN_APP, 0x34D399, 0x064E3B, "BIBLIOTECA"};
+    }
+
+    static constexpr uint32_t ACCENTS[4] = {0x34D399, 0xFB7185, 0x38BDF8, 0xF59E0B};
+    static constexpr uint32_t PRESSBG[4] = {0x064E3B, 0x3B1024, 0x0A2A43, 0x3B2308};
+    const int k = idx % 4;
+    return {PH_ICN_GAME, ACCENTS[k], PRESSBG[k], "GAME HUD"};
+}
+
+DynamicCardVisual resolve_macro_visual(const UiMacroItem &macro, int idx)
+{
+    if (strcasecmp(macro.id, "edge") == 0)    return {PH_ICN_BROWSER, 0x38BDF8, 0x0A2A43, ""};
+    if (strcasecmp(macro.id, "steam") == 0)   return {PH_ICN_GAME,    0x60A5FA, 0x102542, ""};
+    if (strcasecmp(macro.id, "discord") == 0) return {PH_ICN_DISCORD, 0x818CF8, 0x1E1B4B, ""};
+    if (strcasecmp(macro.id, "disney") == 0)  return {PH_ICN_FILM,    0x22D3EE, 0x083344, ""};
+    if (strcasecmp(macro.id, "max") == 0 || strcasecmp(macro.id, "hbo") == 0)
+        return {PH_ICN_MPLAY, 0xA855F7, 0x2E1065, ""};
+
+    static constexpr uint32_t ACCENTS[4] = {0x38BDF8, 0xA78BFA, 0x22D3EE, 0xFB7185};
+    static constexpr uint32_t PRESSBG[4] = {0x0A2A43, 0x22184A, 0x083344, 0x3B1024};
+    const int k = idx % 4;
+    return {PH_ICN_APP, ACCENTS[k], PRESSBG[k], ""};
+}
+
+void configure_game_hud(const UiGameItem &game, const DynamicCardVisual &vis)
+{
+    g_hud_cs2_mode = game.has_c4;
 
     if (g_hud_header_icon)
     {
-        lv_label_set_text(g_hud_header_icon, game.icon_utf8);
-        lv_obj_set_style_text_color(g_hud_header_icon, lv_color_hex(game.accent_hex), 0);
+        lv_label_set_text(g_hud_header_icon, vis.icon_utf8);
+        lv_obj_set_style_text_color(g_hud_header_icon, lv_color_hex(vis.accent_hex), 0);
     }
     if (g_hud_header_title)
     {
-        lv_label_set_text(g_hud_header_title, game.hud_title);
+        lv_label_set_text(g_hud_header_title, game.name);
     }
 
     if (g_hud_cs2_panel && g_hud_gen_panel)
     {
-        if (game.is_cs2)
+        if (game.has_c4)
         {
             lv_obj_clear_flag(g_hud_cs2_panel, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(g_hud_gen_panel, LV_OBJ_FLAG_HIDDEN);
@@ -794,22 +816,22 @@ void configure_game_hud(const GameCardDef &game)
 
             if (g_hud_gen_accent)
             {
-                lv_obj_set_style_bg_color(g_hud_gen_accent, lv_color_hex(game.accent_hex), 0);
+                lv_obj_set_style_bg_color(g_hud_gen_accent, lv_color_hex(vis.accent_hex), 0);
             }
             if (g_hud_gen_icon_box)
             {
-                lv_obj_set_style_bg_color(g_hud_gen_icon_box, lv_color_hex(game.press_bg_hex), 0);
-                lv_obj_set_style_border_color(g_hud_gen_icon_box, lv_color_hex(game.accent_hex), 0);
+                lv_obj_set_style_bg_color(g_hud_gen_icon_box, lv_color_hex(vis.press_bg_hex), 0);
+                lv_obj_set_style_border_color(g_hud_gen_icon_box, lv_color_hex(vis.accent_hex), 0);
             }
             if (g_hud_gen_icon_lbl)
             {
-                lv_label_set_text(g_hud_gen_icon_lbl, game.icon_utf8);
-                lv_obj_set_style_text_color(g_hud_gen_icon_lbl, lv_color_hex(game.accent_hex), 0);
+                lv_label_set_text(g_hud_gen_icon_lbl, vis.icon_utf8);
+                lv_obj_set_style_text_color(g_hud_gen_icon_lbl, lv_color_hex(vis.accent_hex), 0);
             }
             if (g_hud_gen_title)
             {
                 char sbuf[40];
-                snprintf(sbuf, sizeof(sbuf), "SESSÃO: %s", game.hud_title);
+                snprintf(sbuf, sizeof(sbuf), "SESSÃO: %s", game.name);
                 lv_label_set_text(g_hud_gen_title, sbuf);
             }
         }
@@ -824,15 +846,28 @@ void open_games_btn_cb(lv_event_t *e)
 
 void game_card_click_cb(lv_event_t *e)
 {
-    const auto *game = static_cast<const GameCardDef *>(lv_event_get_user_data(e));
-    if (!game) return;
+    const int idx = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    if (idx < 0 || idx >= g_dyn_games_count) return;
 
-    configure_game_hud(*game);
+    const UiGameItem &game = g_dyn_games[idx];
+    const DynamicCardVisual vis = resolve_game_visual(game, idx);
+    configure_game_hud(game, vis);
     update_sidebar_visuals(g_hud_sidebar, g_channels[3], PH_ICN_GAME);
     ui_show_screen(UI_SCREEN_GAME_HUD, true);
     if (g_launch_game_cb)
     {
-        g_launch_game_cb(game->id);
+        g_launch_game_cb(game.id);
+    }
+}
+
+void dyn_macro_btn_cb(lv_event_t *e)
+{
+    const int idx = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    if (idx < 0 || idx >= g_dyn_macros_count) return;
+
+    if (g_macro_cb)
+    {
+        g_macro_cb(g_dyn_macros[idx].id);
     }
 }
 
@@ -1322,11 +1357,36 @@ void build_universal_header(
     lv_obj_set_style_text_color(home_ic, lv_color_hex(is_home ? 0x64748B : HEX_CYAN), 0);
     lv_obj_center(home_ic);
 
-    // 3. Centro Dinâmico (entre HOME x=142 e MIC x=373 -> x=150..368)
+    // 2b. Em screen_game_hud: botão discreto [<] ao lado de HOME para retornar direto a screen_games
+    const bool is_game_hud = (screen_id == UI_SCREEN_GAME_HUD);
+    if (is_game_hud)
+    {
+        lv_obj_t *back_btn = lv_btn_create(header);
+        lv_obj_remove_style_all(back_btn);
+        lv_obj_set_size(back_btn, 46, 42);
+        lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, 148, 0);
+        lv_obj_set_ext_click_area(back_btn, 6);
+        lv_obj_set_style_radius(back_btn, 11, 0);
+        lv_obj_set_style_bg_opa(back_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(back_btn, lv_color_hex(HEX_BTN_IDLE), 0);
+        lv_obj_set_style_bg_color(back_btn, lv_color_hex(0x064E3B), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(back_btn, 1, 0);
+        lv_obj_set_style_border_color(back_btn, lv_color_hex(0x34D399), 0);
+        lv_obj_set_style_border_width(back_btn, 2, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(back_btn, open_games_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+        lv_obj_t *back_ic = lv_label_create(back_btn);
+        lv_label_set_text(back_ic, LV_SYMBOL_LEFT);
+        lv_obj_set_style_text_font(back_ic, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(back_ic, lv_color_hex(0x34D399), 0);
+        lv_obj_center(back_ic);
+    }
+
+    // 3. Centro Dinâmico (entre HOME/VOLTAR e MIC x=373)
     lv_obj_t *center_box = lv_obj_create(header);
     lv_obj_remove_style_all(center_box);
-    lv_obj_set_size(center_box, 218, 42);
-    lv_obj_align(center_box, LV_ALIGN_LEFT_MID, 150, 0);
+    lv_obj_set_size(center_box, is_game_hud ? 168 : 218, 42);
+    lv_obj_align(center_box, LV_ALIGN_LEFT_MID, is_game_hud ? 200 : 150, 0);
     lv_obj_clear_flag(center_box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_layout(center_box, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(center_box, LV_FLEX_FLOW_ROW);
@@ -1946,56 +2006,28 @@ void build_screen_hardware()
 }
 
 // ============================================================================
-// Tela 5: screen_macros (Header 58px + Sidebar Master + Grade 2x3 + CS2 C4)
+// Tela 5: screen_macros (Header 58px + Sidebar Master + Grade Dinâmica + JOGOS)
 // ============================================================================
-struct MacroCardDef {
-    const char *action;
-    const char *title;
-    const char *icon_utf8;
-    uint32_t accent_hex;
-    uint32_t press_bg_hex;
-
-    MacroCardDef(const char *a, const char *t, const char *ic, uint32_t acc, uint32_t pbg)
-        : action(a), title(t), icon_utf8(ic), accent_hex(acc), press_bg_hex(pbg) {}
-};
-
-const MacroCardDef g_macro_cards[5] = {
-    MacroCardDef("edge",    "EDGE",    PH_ICN_BROWSER, 0x38BDF8, 0x0A2A43),
-    MacroCardDef("steam",   "STEAM",   PH_ICN_GAME,    0x60A5FA, 0x102542),
-    MacroCardDef("discord", "DISCORD", PH_ICN_DISCORD, 0x818CF8, 0x1E1B4B),
-    MacroCardDef("disney",  "DISNEY+", PH_ICN_FILM,    0x22D3EE, 0x083344),
-    MacroCardDef("hbo",     "MAX",     PH_ICN_MPLAY,   0xA855F7, 0x2E1065),
-};
-
-void build_screen_macros()
+void rebuild_macros_grid()
 {
-    lv_obj_t *scr = lv_obj_create(nullptr);
-    g_screens[UI_SCREEN_MACROS] = scr;
-    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+    if (!g_macros_grid) return;
+    lv_obj_clean(g_macros_grid);
 
-    build_universal_header(scr, UI_SCREEN_MACROS, PH_ICN_APP, "ATALHOS", 0xA78BFA);
-    build_volume_sidebar(scr, g_macros_sidebar, 0, PH_ICN_VOL);
-
-    // Grade 2x3: x=84..474 (390px), y=68..314 (246px)
-    constexpr int16_t GRID_X = 84;
-    constexpr int16_t GRID_Y = 68;
     constexpr int16_t CARD_W = 124;
     constexpr int16_t CARD_H = 118;
     constexpr int16_t GAP_X  = 9;
     constexpr int16_t GAP_Y  = 10;
 
-    // 5 Cards de Aplicativos / Streaming
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < g_dyn_macros_count; ++i)
     {
-        const MacroCardDef &def = g_macro_cards[i];
+        const UiMacroItem &item = g_dyn_macros[i];
+        const DynamicCardVisual vis = resolve_macro_visual(item, i);
         const int col = i % 3;
         const int row = i / 3;
-        const int16_t x = GRID_X + col * (CARD_W + GAP_X);
-        const int16_t y = GRID_Y + row * (CARD_H + GAP_Y);
+        const int16_t x = col * (CARD_W + GAP_X);
+        const int16_t y = row * (CARD_H + GAP_Y);
 
-        lv_obj_t *btn = lv_btn_create(scr);
+        lv_obj_t *btn = lv_btn_create(g_macros_grid);
         lv_obj_remove_style_all(btn);
         lv_obj_set_pos(btn, x, y);
         lv_obj_set_size(btn, CARD_W, CARD_H);
@@ -2007,38 +2039,48 @@ void build_screen_macros()
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
 
-        lv_obj_set_style_bg_color(btn, lv_color_hex(def.press_bg_hex), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(vis.press_bg_hex), LV_STATE_PRESSED);
         lv_obj_set_style_border_width(btn, 2, LV_STATE_PRESSED);
-        lv_obj_set_style_border_color(btn, lv_color_hex(def.accent_hex), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(btn, lv_color_hex(vis.accent_hex), LV_STATE_PRESSED);
 
         lv_obj_t *accent = lv_obj_create(btn);
         lv_obj_remove_style_all(accent);
         lv_obj_set_size(accent, 42, 3);
         lv_obj_set_style_radius(accent, 2, 0);
         lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(accent, lv_color_hex(def.accent_hex), 0);
+        lv_obj_set_style_bg_color(accent, lv_color_hex(vis.accent_hex), 0);
         lv_obj_align(accent, LV_ALIGN_TOP_MID, 0, 0);
 
         lv_obj_t *icon_lbl = lv_label_create(btn);
-        lv_label_set_text(icon_lbl, def.icon_utf8);
+        lv_label_set_text(icon_lbl, vis.icon_utf8);
         lv_obj_set_style_text_font(icon_lbl, &phosphor_32, 0);
-        lv_obj_set_style_text_color(icon_lbl, lv_color_hex(def.accent_hex), 0);
+        lv_obj_set_style_text_color(icon_lbl, lv_color_hex(vis.accent_hex), 0);
         lv_obj_align(icon_lbl, LV_ALIGN_CENTER, 0, -14);
 
         lv_obj_t *title_lbl = lv_label_create(btn);
-        lv_label_set_text(title_lbl, def.title);
+        lv_label_set_text(title_lbl, item.name);
+        lv_obj_set_width(title_lbl, CARD_W - 12);
+        lv_label_set_long_mode(title_lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(title_lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(title_lbl, &inter_bold_16, 0);
         lv_obj_set_style_text_color(title_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
         lv_obj_align(title_lbl, LV_ALIGN_BOTTOM_MID, 0, -16);
 
-        lv_obj_add_event_cb(btn, macro_btn_cb, LV_EVENT_CLICKED, const_cast<char *>(def.action));
+        lv_obj_add_event_cb(
+            btn,
+            dyn_macro_btn_cb,
+            LV_EVENT_CLICKED,
+            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
     }
 
-    // Card 6 (col=2, row=1): Botão Principal "JOGOS" -> abre screen_games
-    const int16_t games_x = GRID_X + 2 * (CARD_W + GAP_X);
-    const int16_t games_y = GRID_Y + 1 * (CARD_H + GAP_Y);
+    // Último Card fixo: Botão Principal "JOGOS" -> abre screen_games
+    const int games_idx = g_dyn_macros_count;
+    const int g_col = games_idx % 3;
+    const int g_row = games_idx / 3;
+    const int16_t games_x = g_col * (CARD_W + GAP_X);
+    const int16_t games_y = g_row * (CARD_H + GAP_Y);
 
-    lv_obj_t *games_btn = lv_btn_create(scr);
+    lv_obj_t *games_btn = lv_btn_create(g_macros_grid);
     lv_obj_remove_style_all(games_btn);
     lv_obj_set_pos(games_btn, games_x, games_y);
     lv_obj_set_size(games_btn, CARD_W, CARD_H);
@@ -2074,9 +2116,114 @@ void build_screen_macros()
     lv_obj_align(games_lbl, LV_ALIGN_BOTTOM_MID, 0, -16);
 }
 
+void build_screen_macros()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_MACROS] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_MACROS, PH_ICN_APP, "ATALHOS", 0xA78BFA);
+    build_volume_sidebar(scr, g_macros_sidebar, 0, PH_ICN_VOL);
+
+    g_macros_grid = lv_obj_create(scr);
+    lv_obj_remove_style_all(g_macros_grid);
+    lv_obj_set_pos(g_macros_grid, 84, 68);
+    lv_obj_set_size(g_macros_grid, 390, 246);
+    lv_obj_set_scroll_dir(g_macros_grid, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(g_macros_grid, LV_SCROLLBAR_MODE_AUTO);
+
+    // Fallback padrão caso ESP32 inicie antes da conexão com o Windows
+    static const UiMacroItem DEFAULT_MACROS[5] = {
+        {"edge",    "EDGE"},
+        {"steam",   "STEAM"},
+        {"discord", "DISCORD"},
+        {"disney",  "DISNEY+"},
+        {"max",     "MAX"},
+    };
+    g_dyn_macros_count = 5;
+    for (int i = 0; i < 5; ++i)
+    {
+        g_dyn_macros[i] = DEFAULT_MACROS[i];
+    }
+    rebuild_macros_grid();
+}
+
 // ============================================================================
-// Tela 6: screen_games (Menu de Seleção de Jogos — Grade 2x2 Grande)
+// Tela 6: screen_games (Menu Dinâmico de Jogos — Grade 2xN Rolável)
 // ============================================================================
+void rebuild_games_grid()
+{
+    if (!g_games_grid) return;
+    lv_obj_clean(g_games_grid);
+
+    const bool scrollable = (g_dyn_games_count > 4);
+    const int16_t CARD_W = scrollable ? 186 : 190;
+    const int16_t CARD_H = scrollable ? 112 : 118;
+    constexpr int16_t GAP_X = 10;
+    constexpr int16_t GAP_Y = 10;
+
+    for (int i = 0; i < g_dyn_games_count; ++i)
+    {
+        const UiGameItem &game = g_dyn_games[i];
+        const DynamicCardVisual vis = resolve_game_visual(game, i);
+        const int col = i % 2;
+        const int row = i / 2;
+        const int16_t x = col * (CARD_W + GAP_X);
+        const int16_t y = row * (CARD_H + GAP_Y);
+
+        lv_obj_t *btn = lv_btn_create(g_games_grid);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_pos(btn, x, y);
+        lv_obj_set_size(btn, CARD_W, CARD_H);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(btn, 16, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(vis.press_bg_hex), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(btn, 2, LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(btn, lv_color_hex(vis.accent_hex), LV_STATE_PRESSED);
+
+        lv_obj_t *accent = lv_obj_create(btn);
+        lv_obj_remove_style_all(accent);
+        lv_obj_set_size(accent, 52, 3);
+        lv_obj_set_style_radius(accent, 2, 0);
+        lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(accent, lv_color_hex(vis.accent_hex), 0);
+        lv_obj_align(accent, LV_ALIGN_TOP_MID, 0, 0);
+
+        lv_obj_t *ic = lv_label_create(btn);
+        lv_label_set_text(ic, vis.icon_utf8);
+        lv_obj_set_style_text_font(ic, &phosphor_32, 0);
+        lv_obj_set_style_text_color(ic, lv_color_hex(vis.accent_hex), 0);
+        lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 14);
+
+        lv_obj_t *title = lv_label_create(btn);
+        lv_label_set_text(title, game.name);
+        lv_obj_set_width(title, CARD_W - 16);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(title, &inter_bold_16, 0);
+        lv_obj_set_style_text_color(title, lv_color_hex(HEX_TEXT_MAIN), 0);
+        lv_obj_align(title, LV_ALIGN_CENTER, 0, 15);
+
+        lv_obj_t *sub = lv_label_create(btn);
+        lv_label_set_text(sub, vis.subtitle);
+        lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(sub, lv_color_hex(HEX_TEXT_DIM), 0);
+        lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+        lv_obj_add_event_cb(
+            btn,
+            game_card_click_cb,
+            LV_EVENT_CLICKED,
+            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+    }
+}
+
 void build_screen_games()
 {
     lv_obj_t *scr = lv_obj_create(nullptr);
@@ -2088,68 +2235,25 @@ void build_screen_games()
     build_universal_header(scr, UI_SCREEN_GAMES, PH_ICN_GAME, "SELECIONE O JOGO", 0x34D399);
     build_volume_sidebar(scr, g_games_sidebar, 0, PH_ICN_VOL);
 
-    // Grade 2x2 grande: x=84..474 (390px), y=68..314 (246px) -> cards 190x118, gap 10px
-    constexpr int16_t GRID_X = 84;
-    constexpr int16_t GRID_Y = 68;
-    constexpr int16_t CARD_W = 190;
-    constexpr int16_t CARD_H = 118;
-    constexpr int16_t GAP_X  = 10;
-    constexpr int16_t GAP_Y  = 10;
+    g_games_grid = lv_obj_create(scr);
+    lv_obj_remove_style_all(g_games_grid);
+    lv_obj_set_pos(g_games_grid, 84, 68);
+    lv_obj_set_size(g_games_grid, 390, 246);
+    lv_obj_set_scroll_dir(g_games_grid, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(g_games_grid, LV_SCROLLBAR_MODE_AUTO);
 
-    for (int i = 0; i < 4; ++i)
+    // Fallback padrão caso ESP32 inicie antes da conexão com o Windows
+    static const UiGameItem DEFAULT_GAMES[3] = {
+        {"cs2",       "CS2",        true},
+        {"pubg",      "PUBG",       false},
+        {"watchdogs", "WATCH DOGS", false},
+    };
+    g_dyn_games_count = 3;
+    for (int i = 0; i < 3; ++i)
     {
-        const GameCardDef &game = g_game_cards[i];
-        const int col = i % 2;
-        const int row = i / 2;
-        const int16_t x = GRID_X + col * (CARD_W + GAP_X);
-        const int16_t y = GRID_Y + row * (CARD_H + GAP_Y);
-
-        lv_obj_t *btn = lv_btn_create(scr);
-        lv_obj_remove_style_all(btn);
-        lv_obj_set_pos(btn, x, y);
-        lv_obj_set_size(btn, CARD_W, CARD_H);
-        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_radius(btn, 16, 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(HEX_CARD), 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(game.press_bg_hex), LV_STATE_PRESSED);
-        lv_obj_set_style_border_width(btn, 2, LV_STATE_PRESSED);
-        lv_obj_set_style_border_color(btn, lv_color_hex(game.accent_hex), LV_STATE_PRESSED);
-
-        lv_obj_t *accent = lv_obj_create(btn);
-        lv_obj_remove_style_all(accent);
-        lv_obj_set_size(accent, 52, 3);
-        lv_obj_set_style_radius(accent, 2, 0);
-        lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(accent, lv_color_hex(game.accent_hex), 0);
-        lv_obj_align(accent, LV_ALIGN_TOP_MID, 0, 0);
-
-        lv_obj_t *ic = lv_label_create(btn);
-        lv_label_set_text(ic, game.icon_utf8);
-        lv_obj_set_style_text_font(ic, &phosphor_32, 0);
-        lv_obj_set_style_text_color(ic, lv_color_hex(game.accent_hex), 0);
-        lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 16);
-
-        lv_obj_t *title = lv_label_create(btn);
-        lv_label_set_text(title, game.title);
-        lv_obj_set_style_text_font(title, &inter_bold_16, 0);
-        lv_obj_set_style_text_color(title, lv_color_hex(HEX_TEXT_MAIN), 0);
-        lv_obj_align(title, LV_ALIGN_CENTER, 0, 15);
-
-        lv_obj_t *sub = lv_label_create(btn);
-        lv_label_set_text(sub, game.subtitle);
-        lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(sub, lv_color_hex(HEX_TEXT_DIM), 0);
-        lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -11);
-
-        lv_obj_add_event_cb(
-            btn,
-            game_card_click_cb,
-            LV_EVENT_CLICKED,
-            const_cast<GameCardDef *>(&game));
+        g_dyn_games[i] = DEFAULT_GAMES[i];
     }
+    rebuild_games_grid();
 }
 
 // ============================================================================
@@ -3776,6 +3880,63 @@ void ui_sync_pc_bluetooth(bool enabled)
 {
     g_pc_bt_enabled = enabled;
     update_pc_bt_visuals();
+}
+
+void ui_sync_games_config(const UiGameItem *games, int count)
+{
+    if (!games || count <= 0) return;
+    const int n = (count > MAX_DYNAMIC_GAMES) ? MAX_DYNAMIC_GAMES : count;
+
+    bool changed = (n != g_dyn_games_count);
+    if (!changed)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (strcmp(g_dyn_games[i].id, games[i].id) != 0 ||
+                strcmp(g_dyn_games[i].name, games[i].name) != 0 ||
+                g_dyn_games[i].has_c4 != games[i].has_c4)
+            {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) return;
+
+    g_dyn_games_count = n;
+    for (int i = 0; i < n; ++i)
+    {
+        g_dyn_games[i] = games[i];
+    }
+    rebuild_games_grid();
+}
+
+void ui_sync_macros_config(const UiMacroItem *macros, int count)
+{
+    if (!macros || count <= 0) return;
+    const int n = (count > MAX_DYNAMIC_MACROS) ? MAX_DYNAMIC_MACROS : count;
+
+    bool changed = (n != g_dyn_macros_count);
+    if (!changed)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (strcmp(g_dyn_macros[i].id, macros[i].id) != 0 ||
+                strcmp(g_dyn_macros[i].name, macros[i].name) != 0)
+            {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) return;
+
+    g_dyn_macros_count = n;
+    for (int i = 0; i < n; ++i)
+    {
+        g_dyn_macros[i] = macros[i];
+    }
+    rebuild_macros_grid();
 }
 
 void ui_set_conn_state(UiConnState state)

@@ -73,6 +73,17 @@ struct UiWifiNetwork {
     bool secured;
 };
 
+struct UiGameItem {
+    char id[24];
+    char name[24];
+    bool has_c4;
+};
+
+struct UiMacroItem {
+    char id[24];
+    char name[24];
+};
+
 using UiVolumeCallback      = void (*)(const char *target, int value);
 using UiMuteCallback        = void (*)(const char *target);
 using UiMediaCallback       = void (*)(const char *action);
@@ -114,6 +125,8 @@ void ui_sync_stats(
     int disk_pct = -1);
 void ui_sync_cs2_c4(const char *state, int time_left);
 void ui_sync_pc_bluetooth(bool enabled);
+void ui_sync_games_config(const UiGameItem *games, int count);
+void ui_sync_macros_config(const UiMacroItem *macros, int count);
 void ui_set_conn_state(UiConnState state);
 void ui_set_pc_connected(bool connected);
 void ui_set_status_text(const char *text);

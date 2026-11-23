@@ -11,6 +11,9 @@ backend/dist/
 .pio/
 .vscode/
 
+# Credenciais locais (nunca enviar para o Git)
+firmware/include/secrets.h
+
 # Logs e temporários
 *.log
 Thumbs.db
