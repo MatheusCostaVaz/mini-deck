@@ -6,6 +6,8 @@ __pycache__/
 *$py.class
 backend/build/
 backend/dist/
+backend/runtime_portable/
+dist/
 
 # PlatformIO
 .pio/
