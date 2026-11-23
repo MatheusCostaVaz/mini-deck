@@ -1,0 +1,32 @@
+{
+  "games": [
+    {
+      "id": "cs2",
+      "name": "CS2",
+      "process": "cs2.exe",
+      "launch": "steam://rungameid/730",
+      "has_c4": true
+    },
+    {
+      "id": "pubg",
+      "name": "PUBG",
+      "process": "TslGame.exe",
+      "launch": "steam://rungameid/578080",
+      "has_c4": false
+    },
+    {
+      "id": "wardogs",
+      "name": "WARDOGS",
+      "process": "WardogsClient-Win64-Shipping.exe",
+      "launch": "steam://rungameid/1867240",
+      "has_c4": false
+    }
+  ],
+  "macros": [
+    { "id": "edge", "name": "EDGE", "target": "msedge.exe" },
+    { "id": "steam", "name": "STEAM", "target": "steam.exe" },
+    { "id": "discord", "name": "DISCORD", "target": "Discord.exe" },
+    { "id": "disney", "name": "DISNEY+", "target": "https://www.disneyplus.com" },
+    { "id": "max", "name": "MAX", "target": "https://www.max.com" }
+  ]
+}

@@ -20,6 +20,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -30,6 +31,11 @@ import urllib.request
 import webbrowser
 from dataclasses import dataclass
 from typing import Optional
+
+if os.name == "nt":
+    import winreg
+else:
+    winreg = None  # type: ignore[assignment]
 
 from _ctypes import COMError
 import psutil
@@ -135,6 +141,186 @@ WEATHER_API_URL = (
 )
 WEATHER_REFRESH_S = 1800.0  # 30 minutos
 PC_IDLE_TIMEOUT_S = 300.0   # 5 minutos sem input de mouse/teclado
+
+DEFAULT_DECK_CONFIG: dict = {
+    "games": [
+        {
+            "id": "cs2",
+            "name": "CS2",
+            "process": "cs2.exe",
+            "launch": "steam://rungameid/730",
+            "has_c4": True,
+        },
+        {
+            "id": "pubg",
+            "name": "PUBG",
+            "process": "TslGame.exe",
+            "launch": "steam://rungameid/578080",
+            "has_c4": False,
+        },
+        {
+            "id": "wardogs",
+            "name": "WARDOGS",
+            "process": "WardogsClient-Win64-Shipping.exe",
+            "launch": "steam://rungameid/1867240",
+            "has_c4": False,
+        },
+    ],
+    "macros": [
+        {"id": "edge", "name": "EDGE", "target": "msedge.exe"},
+        {"id": "steam", "name": "STEAM", "target": "steam.exe"},
+        {"id": "discord", "name": "DISCORD", "target": "Discord.exe"},
+        {"id": "disney", "name": "DISNEY+", "target": "https://www.disneyplus.com"},
+        {"id": "max", "name": "MAX", "target": "https://www.max.com"},
+    ],
+}
+
+STEAM_IGNORED_NAME_KEYWORDS = (
+    "steamworks",
+    "proton",
+    "steam linux",
+    "dedicated server",
+    "redistributables",
+)
+
+
+def _extract_steam_appid(launch_cmd: str) -> Optional[str]:
+    m = re.search(r"steam://rungameid/(\d+)", launch_cmd or "", re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _get_steam_root_path() -> Optional[Path]:
+    if winreg is not None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+                raw_path, _ = winreg.QueryValueEx(key, "SteamPath")
+                if raw_path:
+                    p = Path(str(raw_path).replace("/", "\\"))
+                    if p.exists():
+                        return p
+        except OSError:
+            pass
+    fallback = Path("C:/Program Files (x86)/Steam")
+    return fallback if fallback.exists() else None
+
+
+def scan_installed_steam_games(logger: Optional[logging.Logger] = None) -> list[dict]:
+    """Localiza todas as bibliotecas Steam via Registro + libraryfolders.vdf e lê appmanifest_*.acf."""
+    steam_root = _get_steam_root_path()
+    if steam_root is None:
+        return []
+
+    libraries: list[Path] = []
+    seen_libs: set[str] = set()
+
+    def _add_library(lib_path: Path) -> None:
+        try:
+            resolved = lib_path.resolve()
+        except OSError:
+            resolved = lib_path
+        key = str(resolved).lower()
+        if key not in seen_libs and (resolved / "steamapps").is_dir():
+            seen_libs.add(key)
+            libraries.append(resolved)
+
+    _add_library(steam_root)
+
+    vdf_path = steam_root / "steamapps" / "libraryfolders.vdf"
+    if vdf_path.is_file():
+        try:
+            vdf_text = vdf_path.read_text(encoding="utf-8", errors="replace")
+            # Formato moderno: "path" "D:\\SteamLibrary"
+            for m in re.finditer(r'"path"\s+"([^"]+)"', vdf_text, re.IGNORECASE):
+                raw = m.group(1).replace("\\\\", "\\")
+                _add_library(Path(raw))
+            # Formato legado: "1" "D:\\SteamLibrary"
+            for m in re.finditer(r'"\d+"\s+"([A-Za-z]:[^"]+)"', vdf_text):
+                raw = m.group(1).replace("\\\\", "\\")
+                _add_library(Path(raw))
+        except OSError as exc:
+            if logger:
+                logger.warning("[Steam Auto-Scan] Falha ao ler %s: %s", vdf_path, exc)
+
+    detected: list[dict] = []
+    seen_appids: set[str] = set()
+
+    for lib in libraries:
+        steamapps = lib / "steamapps"
+        try:
+            manifests = sorted(steamapps.glob("appmanifest_*.acf"))
+        except OSError:
+            continue
+
+        for acf in manifests:
+            try:
+                content = acf.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            m_id = re.search(r'"appid"\s+"(\d+)"', content, re.IGNORECASE)
+            m_name = re.search(r'"name"\s+"([^"]+)"', content, re.IGNORECASE)
+            if not m_id or not m_name:
+                continue
+
+            appid = m_id.group(1).strip()
+            raw_name = m_name.group(1).strip()
+            if not appid or not raw_name or appid in seen_appids:
+                continue
+
+            low_name = raw_name.lower()
+            if any(kw in low_name for kw in STEAM_IGNORED_NAME_KEYWORDS):
+                continue
+
+            seen_appids.add(appid)
+
+            if appid == "730":
+                detected.append(
+                    {
+                        "id": "cs2",
+                        "name": "CS2",
+                        "process": "cs2.exe",
+                        "launch": "steam://rungameid/730",
+                        "has_c4": True,
+                        "_priority": 0,
+                    }
+                )
+            elif appid == "578080":
+                detected.append(
+                    {
+                        "id": "pubg",
+                        "name": "PUBG",
+                        "process": "TslGame.exe",
+                        "launch": "steam://rungameid/578080",
+                        "has_c4": False,
+                        "_priority": 1,
+                    }
+                )
+            else:
+                short_name = raw_name[:14].strip().upper()
+                detected.append(
+                    {
+                        "id": f"steam_{appid}",
+                        "name": short_name,
+                        "process": "",
+                        "launch": f"steam://rungameid/{appid}",
+                        "has_c4": False,
+                        "_priority": 2,
+                    }
+                )
+
+    detected.sort(key=lambda g: (g.get("_priority", 2), g["name"].lower()))
+    for g in detected:
+        g.pop("_priority", None)
+
+    if logger:
+        logger.info(
+            "[Steam Auto-Scan] %d biblioteca(s) verificada(s), %d jogo(s) detectado(s): %s",
+            len(libraries),
+            len(detected),
+            ", ".join(g["name"] for g in detected) if detected else "nenhum",
+        )
+    return detected
+
 
 if getattr(sys, "frozen", False):
     BACKEND_DIR = Path(sys.executable).resolve().parent
@@ -886,6 +1072,13 @@ class MiniDeckWiFiBridge:
         self._idle = IdleMonitor()
         self._last_pc_idle: bool = False
 
+        # Configuração dinâmica de Jogos e Atalhos (backend/config.json com hot-reload)
+        self._config_path: Path = self._resolve_config_path()
+        self._config_mtime: float = -1.0
+        self._deck_config: dict = {"games": [], "macros": []}
+        self._dynamic_game_candidates: tuple[str, ...] = KNOWN_GAME_CANDIDATES
+        self._load_deck_config(force=True)
+
     # ------------------------------------------------------------------
     # Auto-Discovery UDP (porta 4210)
     # ------------------------------------------------------------------
@@ -953,8 +1146,8 @@ class MiniDeckWiFiBridge:
         if not candidates:
             return None
 
-        # 1. Prioridade máxima: jogos conhecidos (cs2.exe, TslGame.exe, WatchDogs*.exe, WARDOGS)
-        known = self._pick_session(candidates, KNOWN_GAME_CANDIDATES)
+        # 1. Prioridade máxima: jogos conhecidos (KNOWN_GAME_CANDIDATES + processos do config.json)
+        known = self._pick_session(candidates, self._dynamic_game_candidates)
         if known is not None:
             return known
 
@@ -1245,42 +1438,216 @@ class MiniDeckWiFiBridge:
         except OSError:
             return False
 
-    def _execute_macro(self, action: str) -> bool:
-        action = action.strip().lower()
-        if action == "edge":
-            return self._launch_windows_target("msedge")
-        if action == "steam":
-            return self._launch_windows_target("steam://open/main")
-        if action == "discord":
-            if self._launch_windows_target("discord://"):
-                return True
-            local_app = os.environ.get("LOCALAPPDATA", "")
-            updater = Path(local_app) / "Discord" / "Update.exe"
-            if updater.exists():
-                try:
-                    creationflags = 0x08000000 if os.name == "nt" else 0
-                    subprocess.Popen(
-                        [str(updater), "--processStart", "Discord.exe"],
-                        creationflags=creationflags,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    return True
-                except OSError:
+    @staticmethod
+    def _resolve_config_path() -> Path:
+        direct = BACKEND_DIR / "config.json"
+        if direct.exists():
+            return direct
+        parent = BACKEND_DIR.parent / "config.json"
+        if parent.exists():
+            return parent
+        return direct
+
+    def _merge_games_with_steam(self, cfg_games: list[dict]) -> list[dict]:
+        """Combina jogos personalizados do config.json com jogos instalados na Steam (sem duplicatas)."""
+        steam_games = scan_installed_steam_games(self.log)
+
+        merged: list[dict] = []
+        seen_ids: set[str] = set()
+        seen_appids: set[str] = set()
+
+        def _append_unique(item: dict) -> None:
+            gid = str(item.get("id", "")).strip().lower()
+            appid = _extract_steam_appid(str(item.get("launch", "")))
+            if not gid or gid in seen_ids:
+                return
+            if appid and appid in seen_appids:
+                return
+            seen_ids.add(gid)
+            if appid:
+                seen_appids.add(appid)
+            merged.append(item)
+
+        # 1. Jogos configurados/personalizados do config.json (ex.: WARDOGS, CS2, PUBG)
+        for g in cfg_games:
+            _append_unique(g)
+
+        # 2. Jogos instalados na Steam detectados dinamicamente
+        for sg in steam_games:
+            _append_unique(sg)
+
+        return merged[:8]
+
+    def _load_deck_config(self, force: bool = False) -> bool:
+        """Carrega backend/config.json + auto-scan Steam (hot-reload por mtime). Retorna True se houve mudança."""
+        self._config_path = self._resolve_config_path()
+        try:
+            if self._config_path.exists():
+                mtime = self._config_path.stat().st_mtime
+                if not force and mtime == self._config_mtime:
                     return False
-            return False
-        if action == "disney":
-            return bool(webbrowser.open("https://www.disneyplus.com"))
-        if action == "hbo":
-            return bool(webbrowser.open("https://www.max.com"))
-        if action == "cs2_c4":
+                raw = json.loads(self._config_path.read_text(encoding="utf-8"))
+                games = raw.get("games")
+                macros = raw.get("macros")
+                if not isinstance(games, list):
+                    games = DEFAULT_DECK_CONFIG["games"]
+                if not isinstance(macros, list):
+                    macros = DEFAULT_DECK_CONFIG["macros"]
+
+                norm_games: list[dict] = []
+                for g in games:
+                    if not isinstance(g, dict):
+                        continue
+                    gid = str(g.get("id", "")).strip()
+                    gname = str(g.get("name", gid)).strip()
+                    if not gid or not gname:
+                        continue
+                    norm_games.append(
+                        {
+                            "id": gid[:23],
+                            "name": gname[:23],
+                            "process": str(g.get("process", "")).strip(),
+                            "launch": str(g.get("launch", "")).strip(),
+                            "has_c4": bool(g.get("has_c4", False)),
+                        }
+                    )
+
+                norm_macros: list[dict] = []
+                for m in macros[:8]:
+                    if not isinstance(m, dict):
+                        continue
+                    mid = str(m.get("id", "")).strip()
+                    mname = str(m.get("name", mid)).strip()
+                    if not mid or not mname:
+                        continue
+                    norm_macros.append(
+                        {
+                            "id": mid[:23],
+                            "name": mname[:23],
+                            "target": str(m.get("target", "")).strip(),
+                        }
+                    )
+
+                combined_games = self._merge_games_with_steam(norm_games)
+                self._deck_config = {
+                    "games": combined_games if combined_games else list(DEFAULT_DECK_CONFIG["games"]),
+                    "macros": norm_macros if norm_macros else list(DEFAULT_DECK_CONFIG["macros"]),
+                }
+                self._config_mtime = mtime
+                extra_procs = [
+                    g["process"].lower()
+                    for g in self._deck_config["games"]
+                    if g.get("process")
+                ]
+                self._dynamic_game_candidates = tuple(dict.fromkeys([*extra_procs, *KNOWN_GAME_CANDIDATES]))
+                self.log.info(
+                    "[Config] Carregado %s + Steam Auto-Scan (%d jogos: %s | %d atalhos).",
+                    self._config_path,
+                    len(self._deck_config["games"]),
+                    ", ".join(g["name"] for g in self._deck_config["games"]),
+                    len(self._deck_config["macros"]),
+                )
+                return True
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            self.log.warning("[Config] Erro ao ler %s (%s). Mantendo configuração atual.", self._config_path, exc)
+
+        if force and not self._deck_config.get("games"):
+            combined_games = self._merge_games_with_steam(list(DEFAULT_DECK_CONFIG["games"]))
+            self._deck_config = {
+                "games": combined_games if combined_games else list(DEFAULT_DECK_CONFIG["games"]),
+                "macros": list(DEFAULT_DECK_CONFIG["macros"]),
+            }
+            self._dynamic_game_candidates = KNOWN_GAME_CANDIDATES
             return True
+        return False
+
+    async def _sync_deck_config_to_esp32(self, ws, force: bool = False) -> None:
+        changed = self._load_deck_config(force=False)
+        if not force and not changed:
+            return
+        games_payload = {
+            "sync": "games_config",
+            "list": [
+                {
+                    "id": g["id"],
+                    "name": g["name"],
+                    "has_c4": bool(g.get("has_c4", False)),
+                }
+                for g in self._deck_config.get("games", [])
+            ],
+        }
+        macros_payload = {
+            "sync": "macros_config",
+            "list": [
+                {"id": m["id"], "name": m["name"]}
+                for m in self._deck_config.get("macros", [])
+            ],
+        }
+        try:
+            await self._send_json(ws, games_payload)
+            await self._send_json(ws, macros_payload)
+            if changed and not force:
+                self.log.info("[Config -> WiFi] Catálogo atualizado em tempo real no Mini Deck!")
+        except (WebSocketException, OSError):
+            pass
+
+    def _launch_discord(self) -> bool:
+        if self._launch_windows_target("discord://"):
+            return True
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        updater = Path(local_app) / "Discord" / "Update.exe"
+        if updater.exists():
+            try:
+                creationflags = 0x08000000 if os.name == "nt" else 0
+                subprocess.Popen(
+                    [str(updater), "--processStart", "Discord.exe"],
+                    creationflags=creationflags,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except OSError:
+                return False
+        return False
+
+    def _execute_macro(self, action: str) -> bool:
+        action_id = action.strip().lower()
+        if action_id == "cs2_c4":
+            return True
+
+        for macro in self._deck_config.get("macros", []):
+            if str(macro.get("id", "")).strip().lower() == action_id:
+                target = str(macro.get("target", "")).strip()
+                if not target:
+                    return False
+                low = target.lower()
+                if low.startswith(("http://", "https://")):
+                    return bool(webbrowser.open(target))
+                if low == "discord.exe":
+                    return self._launch_discord() or self._launch_windows_target(target)
+                if low == "steam.exe":
+                    return self._launch_windows_target("steam://open/main") or self._launch_windows_target(target)
+                return self._launch_windows_target(target)
+
+        # Fallbacks legados caso algum botão antigo dispare
+        if action_id == "edge":
+            return self._launch_windows_target("msedge")
+        if action_id == "steam":
+            return self._launch_windows_target("steam://open/main")
+        if action_id == "discord":
+            return self._launch_discord()
+        if action_id == "disney":
+            return bool(webbrowser.open("https://www.disneyplus.com"))
+        if action_id in ("hbo", "max"):
+            return bool(webbrowser.open("https://www.max.com"))
         return False
 
     @staticmethod
     def _find_running_process(process_names: tuple[str, ...]) -> Optional[str]:
         """Verifica via psutil se algum dos processos informados já está em execução."""
-        targets = {p.lower() for p in process_names}
+        targets = {p.lower() for p in process_names if p}
+        if not targets:
+            return None
         for proc in psutil.process_iter(["name"]):
             try:
                 name = proc.info.get("name")
@@ -1290,53 +1657,46 @@ class MiniDeckWiFiBridge:
                 continue
         return None
 
+    def _find_game_entry(self, game_id: str) -> Optional[dict]:
+        gid = game_id.strip().lower()
+        for g in self._deck_config.get("games", []):
+            if str(g.get("id", "")).strip().lower() == gid:
+                return g
+        return None
+
     def _launch_game(self, game: str) -> tuple[bool, str, bool]:
-        """Inicia o jogo selecionado pelo Hub de Jogos apenas se não estiver em execução.
+        """Inicia o jogo configurado em config.json apenas se não estiver em execução.
 
         Retorna (ok, descricao, already_running).
         """
         game_id = game.strip().lower()
-        process_map: dict[str, tuple[str, ...]] = {
-            "cs2": ("cs2.exe",),
-            "pubg": ("tslgame.exe",),
-            "watchdogs": (
-                "watchdogs.exe",
-                "watchdogs2.exe",
-                "watchdogslegion.exe",
-                "wardogsclient-win64-shipping.exe",
-                "wardogs.exe",
-            ),
-        }
+        entry = self._find_game_entry(game_id)
 
-        if game_id in process_map:
-            running = self._find_running_process(process_map[game_id])
+        if entry is not None:
+            proc_name = str(entry.get("process", "")).strip()
+            candidates: list[str] = [proc_name] if proc_name else []
+            if game_id in ("wardogs", "watchdogs"):
+                candidates.extend(
+                    [
+                        "wardogsclient-win64-shipping.exe",
+                        "wardogs.exe",
+                        "watchdogs.exe",
+                        "watchdogs2.exe",
+                        "watchdogslegion.exe",
+                    ]
+                )
+            running = self._find_running_process(tuple(candidates))
             if running:
                 return True, f"{running} já em execução", True
 
-        if game_id == "cs2":
-            return self._launch_windows_target("steam://rungameid/730"), "Counter-Strike 2 (Steam 730)", False
-        if game_id == "pubg":
-            return self._launch_windows_target("steam://rungameid/578080"), "PUBG: BATTLEGROUNDS (Steam 578080)", False
-        if game_id == "watchdogs":
-            # Procura primeiro por atalho Watch Dogs no Desktop; depois WARDOGS (Steam 1867240) ou Ubisoft Connect
-            desktop_dirs = [
-                Path(os.environ.get("USERPROFILE", "")) / "Desktop",
-                Path(os.environ.get("PUBLIC", "C:\\Users\\Public")) / "Desktop",
-            ]
-            for d in desktop_dirs:
-                if not d.exists():
-                    continue
-                for entry in d.iterdir():
-                    low = entry.name.lower()
-                    if low.endswith((".lnk", ".url")) and ("watch dogs" in low or "watch_dogs" in low):
-                        return self._launch_windows_target(str(entry)), entry.name, False
-            # Fallback para WARDOGS instalado via Steam (AppID 1867240) ou Ubisoft Connect
-            steam_wardogs = Path("C:/Program Files (x86)/Steam/steamapps/appmanifest_1867240.acf")
-            if steam_wardogs.exists():
-                return self._launch_windows_target("steam://rungameid/1867240"), "WARDOGS (Steam 1867240)", False
-            if self._launch_windows_target("uplay://"):
-                return True, "Ubisoft Connect", False
-            return self._launch_windows_target("steam://open/games"), "Steam Biblioteca", False
+            launch_cmd = str(entry.get("launch", "")).strip()
+            label = str(entry.get("name", game_id)).strip() or game_id
+            if not launch_cmd:
+                return False, f"{label} (sem comando launch)", False
+            if launch_cmd.lower().startswith(("http://", "https://")):
+                return bool(webbrowser.open(launch_cmd)), f"{label} ({launch_cmd})", False
+            return self._launch_windows_target(launch_cmd), f"{label} ({launch_cmd})", False
+
         if game_id == "custom":
             return self._launch_windows_target("steam://open/games"), "Steam Biblioteca (Outros)", False
         return False, game_id, False
@@ -1386,7 +1746,7 @@ class MiniDeckWiFiBridge:
 
     async def _sync_pc_idle_to_esp32(self, ws, force: bool = False) -> None:
         idle_s = self._idle.get_idle_seconds()
-        game_running = self._find_running_process(KNOWN_GAME_CANDIDATES) is not None
+        game_running = self._find_running_process(self._dynamic_game_candidates) is not None
         is_idle = (idle_s >= PC_IDLE_TIMEOUT_S) and (not game_running)
         if force or is_idle != self._last_pc_idle:
             self._last_pc_idle = is_idle
@@ -1667,7 +2027,8 @@ class MiniDeckWiFiBridge:
                     label,
                     "OK" if ok else "FALHA",
                 )
-            if game == "cs2":
+            entry = self._find_game_entry(game)
+            if game == "cs2" or (entry is not None and entry.get("has_c4")):
                 await self._start_cs2_gsi_server()
                 await self._sync_cs2_c4_to_esp32(ws)
             await self._sync_game_channel(ws, audio)
@@ -1713,6 +2074,7 @@ class MiniDeckWiFiBridge:
 
         if event == "ready":
             self.log.info("[ESP32 WiFi] Placa pronta -> enviando sincronização completa...")
+            await self._sync_deck_config_to_esp32(ws, force=True)
             await self._sync_to_esp32(ws, audio, force_all=True)
             await self._sync_media_to_esp32(ws, audio=None, force=True)
             await self._sync_stats_to_esp32(ws, log_once=False)
@@ -1924,6 +2286,7 @@ class MiniDeckWiFiBridge:
         self._active_ws = ws
         if self._enable_tcp_nodelay(getattr(ws, "transport", None)):
             self.log.info("  WebSocket      -> TCP_NODELAY ativo (baixa latência)")
+        await self._sync_deck_config_to_esp32(ws, force=True)
         await self._sync_to_esp32(ws, audio, force_all=True)
         await self._sync_media_to_esp32(ws, audio=audio, force=True)
         await self._sync_stats_to_esp32(ws, log_once=True)
@@ -1992,6 +2355,7 @@ class MiniDeckWiFiBridge:
                     await self._sync_stats_to_esp32(ws, log_once=False)
                     await self._sync_pc_bluetooth_to_esp32(ws, force=False)
                     await self._sync_weather_to_esp32(ws, force=False)
+                    await self._sync_deck_config_to_esp32(ws, force=False)
                 now = time.monotonic()
                 if (now - last_ping) >= APP_PING_INTERVAL_S:
                     last_ping = now
