@@ -4155,7 +4155,19 @@ bool ui_is_wifi_modal_open()
 void ui_enter_screensaver()
 {
     if (g_active_screen == UI_SCREEN_SCREENSAVER) return;
-    if (g_active_screen == UI_SCREEN_GAME_HUD) return;
+
+    lv_obj_t *active_scr = lv_scr_act();
+    if (active_scr == g_screens[UI_SCREEN_HARDWARE] ||
+        active_scr == g_screens[UI_SCREEN_GAMES] ||
+        active_scr == g_screens[UI_SCREEN_GAME_HUD] ||
+        g_active_screen == UI_SCREEN_HARDWARE ||
+        g_active_screen == UI_SCREEN_GAMES ||
+        g_active_screen == UI_SCREEN_GAME_HUD)
+    {
+        // Bloqueia a transição para o descanso de tela enquanto o usuário estiver monitorando hardware ou jogando
+        return;
+    }
+
     if (ui_is_wifi_modal_open()) return;
 
     g_prev_screen_before_ss = g_active_screen;
