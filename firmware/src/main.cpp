@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Arduino_GFX_Library.h>
+#include <Preferences.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -13,10 +14,32 @@
 #include "ui.h"
 
 // ============================================================================
-// Configuração Wi-Fi, WebSocket, Auto-Discovery UDP e NTP (Brasil GMT-3)
+// Configuração Wi-Fi (com NVS), WebSocket, Auto-Discovery UDP e NTP (GMT-3)
 // ============================================================================
-static constexpr const char *WIFI_SSID = "WIFI 2.4";
-static constexpr const char *WIFI_PASS = "Pass718293";
+static constexpr const char *DEFAULT_WIFI_SSID = "WIFI 2.4";
+static constexpr const char *DEFAULT_WIFI_PASS = "Pass718293";
+static constexpr const char *NVS_NAMESPACE = "minideck";
+
+// Backlight PWM via LEDC (Guition JC3248W535C usa GFX_BL = GPIO 1)
+#define LCD_BL_PIN         GFX_BL
+#define LCD_BL_PWM_CHANNEL 0
+#define LCD_BL_FREQ        5000
+#define LCD_BL_RES         8 // Resolução de 8 bits: 0 a 255
+static constexpr uint8_t DEFAULT_LCD_BRIGHTNESS = 80;
+static constexpr uint8_t DEFAULT_STANDBY_MINUTES = 5;
+static constexpr uint32_t WS_DISCONNECT_STANDBY_MS = 20000;
+static constexpr uint32_t SYS_METRICS_POLL_MS = 3000;
+static uint8_t g_lcd_brightness = DEFAULT_LCD_BRIGHTNESS;
+static uint8_t g_standby_minutes = DEFAULT_STANDBY_MINUTES;
+static bool g_screensaver_dimmed = false;
+static bool g_pc_idle_active = false;
+static bool g_ws_ever_connected = false;
+static bool g_ws_disconnect_ss_triggered = false;
+static uint32_t g_ws_disconnected_since_ms = 0;
+static uint32_t g_last_user_touch_ms = 0;
+static uint32_t g_last_sys_metrics_ms = 0;
+static bool g_touch_wake_swallow = false;
+static String g_ws_host_ip_str;
 
 static constexpr uint16_t WS_PORT = 81;
 static constexpr uint16_t UDP_DISCOVERY_PORT = 4210;
@@ -74,6 +97,7 @@ static lv_indev_drv_t g_indev_drv;
 // ============================================================================
 static constexpr uint32_t SERIAL_HEARTBEAT_TIMEOUT_MS = 3000;
 static constexpr uint32_t WIFI_POLL_INTERVAL_MS = 500;
+static constexpr uint32_t WIFI_RSSI_POLL_INTERVAL_MS = 5000;
 static constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
 static constexpr uint32_t CLOCK_POLL_UNSYNCED_MS = 1000;
 static constexpr uint32_t CLOCK_POLL_SYNCED_MS = 10000;
@@ -88,12 +112,27 @@ static String g_serial_rx;
 static uint32_t g_last_serial_rx_ms = 0;
 static bool g_serial_pc_connected = false;
 
+static Preferences g_prefs;
+static String g_saved_ssid;
+static String g_saved_pass;
+static String g_pending_ssid;
+static String g_pending_pass;
+static bool g_wifi_trying_new = false;
+static bool g_wifi_restoring = false;
+static bool g_wifi_ever_connected = false;
+static bool g_boot_rescue_active = false;
+static uint32_t g_wifi_attempt_start_ms = 0;
+static int g_wifi_last_countdown_sec = -1;
+static bool g_wifi_scanning = false;
+static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 12000;
+
 static bool g_wifi_connected = false;
 static bool g_ws_started = false;
 static bool g_ws_client_connected = false;
 static bool g_ntp_synced = false;
 
 static uint32_t g_last_wifi_poll_ms = 0;
+static uint32_t g_last_rssi_poll_ms = 0;
 static uint32_t g_last_wifi_retry_ms = 0;
 static uint32_t g_last_udp_bcast_ms = 0;
 static uint32_t g_last_clock_poll_ms = 0;
@@ -228,11 +267,19 @@ static void my_touch_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         g_last_touch_y = ty;
         g_touch_pressed = true;
         g_touch_miss_count = 0;
+        g_last_user_touch_ms = millis();
+
+        if (ui_is_screensaver_active())
+        {
+            g_touch_wake_swallow = true;
+            ui_wake_screensaver();
+        }
     }
     else if (explicitRelease)
     {
         g_touch_pressed = false;
         g_touch_miss_count = 0;
+        g_touch_wake_swallow = false;
     }
     else if (g_touch_pressed)
     {
@@ -240,12 +287,13 @@ static void my_touch_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         {
             g_touch_pressed = false;
             g_touch_miss_count = 0;
+            g_touch_wake_swallow = false;
         }
     }
 
     data->point.x = g_last_touch_x;
     data->point.y = g_last_touch_y;
-    data->state = g_touch_pressed ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
+    data->state = (g_touch_pressed && !g_touch_wake_swallow) ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
 }
 
 // ============================================================================
@@ -319,6 +367,11 @@ static void sendLaunchGame(const char *gameId)
     char buf[96];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"launch_game\",\"game\":\"%s\"}", gameId);
     broadcastOutgoingEvent(buf);
+}
+
+static void sendTogglePcBluetooth()
+{
+    broadcastOutgoingEvent("{\"cmd\":\"toggle_pc_bluetooth\"}");
 }
 
 // ============================================================================
@@ -485,6 +538,42 @@ static void handleIncomingMessage(String line, bool fromWifi, uint8_t wsClientNu
         ui_sync_cs2_c4(state, timeLeft);
         validMessage = true;
     }
+    else if (strcmp(syncType, "pc_bluetooth") == 0)
+    {
+        const char *state = doc["state"] | "off";
+        ui_sync_pc_bluetooth(strcasecmp(state, "on") == 0);
+        validMessage = true;
+    }
+    else if (strcmp(syncType, "weather") == 0)
+    {
+        const int tempC = doc["temp"] | 0;
+        const char *city = doc["city"] | "São Luís";
+        ui_sync_weather(tempC, city);
+        validMessage = true;
+    }
+    else if (strcmp(syncType, "pc_idle") == 0)
+    {
+        bool idleState = false;
+        if (doc["state"].is<bool>())
+        {
+            idleState = doc["state"].as<bool>();
+        }
+        else
+        {
+            idleState = (doc["state"] | 0) != 0;
+        }
+        g_pc_idle_active = idleState;
+        if (idleState)
+        {
+            ui_enter_screensaver();
+        }
+        else
+        {
+            g_last_user_touch_ms = millis();
+            ui_wake_screensaver();
+        }
+        validMessage = true;
+    }
 
     if (validMessage)
     {
@@ -543,12 +632,27 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_
     {
         IPAddress clientIp = webSocket.remoteIP(num);
         g_ws_client_connected = true;
+        g_ws_ever_connected = true;
+        g_ws_disconnect_ss_triggered = false;
+        g_ws_disconnected_since_ms = 0;
+        g_ws_host_ip_str = clientIp.toString();
         refreshConnectionBadge();
+        ui_set_system_metrics(
+            ESP.getFreeHeap() / 1024U,
+            ESP.getFreePsram() / 1024U,
+            ESP.getFreeSketchSpace() / 1024U,
+            g_ws_host_ip_str.c_str());
+
+        if (!g_pc_idle_active && ui_is_screensaver_active())
+        {
+            g_last_user_touch_ms = millis();
+            ui_wake_screensaver();
+        }
 
         Serial.printf(
             "{\"event\":\"ws_connected\",\"client\":%u,\"ip\":\"%s\"}\n",
             static_cast<unsigned>(num),
-            clientIp.toString().c_str());
+            g_ws_host_ip_str.c_str());
 
         // Notifica cliente recém-conectado para disparar sincronização completa imediata
         char readyBuf[128];
@@ -565,6 +669,17 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_
     case WStype_DISCONNECTED:
         Serial.printf("{\"event\":\"ws_disconnected\",\"client\":%u}\n", static_cast<unsigned>(num));
         g_ws_client_connected = (webSocket.connectedClients() > 0);
+        if (!g_ws_client_connected)
+        {
+            g_ws_host_ip_str = "";
+            g_ws_disconnected_since_ms = millis();
+            g_ws_disconnect_ss_triggered = false;
+            ui_set_system_metrics(
+                ESP.getFreeHeap() / 1024U,
+                ESP.getFreePsram() / 1024U,
+                ESP.getFreeSketchSpace() / 1024U,
+                "");
+        }
         refreshConnectionBadge();
         break;
 
@@ -638,20 +753,235 @@ static void pollUdpDiscovery()
 }
 
 // ============================================================================
-// Wi-Fi em Segundo Plano (Não-Bloqueante) e Relógio NTP (GMT-3)
+// Wi-Fi em Segundo Plano (NVS + Fallback Seguro 12s + Scanner Assíncrono) e NTP
 // ============================================================================
+static void loadWifiCredentials()
+{
+    g_prefs.begin(NVS_NAMESPACE, true);
+    g_saved_ssid = g_prefs.getString("ssid", "");
+    g_saved_pass = g_prefs.getString("pass", "");
+    g_prefs.end();
+
+    if (g_saved_ssid.isEmpty())
+    {
+        g_saved_ssid = DEFAULT_WIFI_SSID;
+        g_saved_pass = DEFAULT_WIFI_PASS;
+    }
+}
+
+static void saveWifiCredentialsToNvs(const String &ssid, const String &pass)
+{
+    g_prefs.begin(NVS_NAMESPACE, false);
+    g_prefs.putString("ssid", ssid);
+    g_prefs.putString("pass", pass);
+    g_prefs.end();
+}
+
+static void startWifiScan()
+{
+    WiFi.scanDelete();
+    g_wifi_scanning = true;
+    ui_set_wifi_scan_status("Escaneando redes...");
+
+    const int16_t res = WiFi.scanNetworks(true, false);
+    if (res == WIFI_SCAN_FAILED)
+    {
+        g_wifi_scanning = false;
+        ui_set_wifi_scan_status("Falha ao iniciar scan");
+        Serial.println("{\"event\":\"wifi_scan\",\"status\":\"failed\"}");
+        return;
+    }
+
+    Serial.println("{\"event\":\"wifi_scan\",\"status\":\"started\"}");
+}
+
+static void pollWifiScan()
+{
+    if (!g_wifi_scanning)
+    {
+        return;
+    }
+
+    const int16_t found = WiFi.scanComplete();
+    if (found == WIFI_SCAN_RUNNING)
+    {
+        return;
+    }
+
+    g_wifi_scanning = false;
+
+    if (found == WIFI_SCAN_FAILED || found < 0)
+    {
+        WiFi.scanDelete();
+        ui_set_wifi_scan_status("Falha ao escanear");
+        Serial.println("{\"event\":\"wifi_scan\",\"status\":\"failed\"}");
+        return;
+    }
+
+    static constexpr int MAX_NETS = 12;
+    UiWifiNetwork nets[MAX_NETS];
+    int count = 0;
+
+    for (int16_t i = 0; i < found; ++i)
+    {
+        String ssid = WiFi.SSID(i);
+        ssid.trim();
+        if (ssid.isEmpty())
+        {
+            continue;
+        }
+
+        const int32_t rssi = WiFi.RSSI(i);
+        const bool secured = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+
+        // Deduplica por SSID mantendo o sinal mais forte
+        int existingIdx = -1;
+        for (int j = 0; j < count; ++j)
+        {
+            if (strcmp(nets[j].ssid, ssid.c_str()) == 0)
+            {
+                existingIdx = j;
+                break;
+            }
+        }
+
+        if (existingIdx >= 0)
+        {
+            if (rssi > nets[existingIdx].rssi)
+            {
+                nets[existingIdx].rssi = rssi;
+                nets[existingIdx].secured = secured;
+            }
+            continue;
+        }
+
+        if (count < MAX_NETS)
+        {
+            strncpy(nets[count].ssid, ssid.c_str(), sizeof(nets[count].ssid) - 1);
+            nets[count].ssid[sizeof(nets[count].ssid) - 1] = '\0';
+            nets[count].rssi = rssi;
+            nets[count].secured = secured;
+            ++count;
+        }
+    }
+
+    // Ordena do sinal mais forte (RSSI mais alto) para o mais fraco
+    for (int i = 0; i < count; ++i)
+    {
+        for (int j = i + 1; j < count; ++j)
+        {
+            if (nets[j].rssi > nets[i].rssi)
+            {
+                UiWifiNetwork tmp = nets[i];
+                nets[i] = nets[j];
+                nets[j] = tmp;
+            }
+        }
+    }
+
+    WiFi.scanDelete();
+    ui_set_wifi_scan_results(nets, count);
+    Serial.printf("{\"event\":\"wifi_scan\",\"status\":\"done\",\"count\":%d}\n", count);
+}
+
+static void restoreSavedWifi(const char *reason)
+{
+    g_wifi_trying_new = false;
+    g_wifi_restoring = true;
+    g_pending_ssid = "";
+    g_pending_pass = "";
+    g_wifi_last_countdown_sec = -1;
+
+    g_wifi_connected = false;
+    g_ws_client_connected = false;
+    refreshConnectionBadge();
+    ui_set_wifi_status(false, nullptr, g_saved_ssid.c_str(), 0);
+    ui_set_wifi_scan_status("Falha ao conectar. Restaurando rede anterior...");
+
+    WiFi.disconnect(false);
+    delay(50);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(g_saved_ssid.c_str(), g_saved_pass.c_str());
+    WiFi.setSleep(false);
+
+    const uint32_t now = millis();
+    g_last_wifi_poll_ms = now;
+    g_last_wifi_retry_ms = now;
+
+    Serial.printf(
+        "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"fallback_restore\",\"reason\":\"%s\"}\n",
+        g_saved_ssid.c_str(),
+        reason ? reason : "timeout");
+}
+
+static void saveAndConnectWifi(const char *ssid, const char *pass)
+{
+    if (!ssid || ssid[0] == '\0')
+    {
+        return;
+    }
+
+    const char *safePass = pass ? pass : "";
+
+    // Mantém g_saved_ssid/g_saved_pass intactos como backup até confirmar WL_CONNECTED
+    g_pending_ssid = ssid;
+    g_pending_pass = safePass;
+    g_wifi_trying_new = true;
+    g_wifi_restoring = false;
+    g_wifi_attempt_start_ms = millis();
+    g_wifi_last_countdown_sec = static_cast<int>(WIFI_CONNECT_TIMEOUT_MS / 1000);
+
+    if (g_wifi_scanning)
+    {
+        WiFi.scanDelete();
+        g_wifi_scanning = false;
+    }
+
+    g_wifi_connected = false;
+    g_ws_client_connected = false;
+    refreshConnectionBadge();
+    ui_set_wifi_status(false, nullptr, g_pending_ssid.c_str(), 0);
+
+    char statusBuf[96];
+    snprintf(
+        statusBuf,
+        sizeof(statusBuf),
+        "Conectando a %s... (Tentativa de %ds)",
+        g_pending_ssid.c_str(),
+        g_wifi_last_countdown_sec);
+    ui_set_wifi_scan_status(statusBuf);
+
+    WiFi.disconnect(false);
+    delay(50);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(g_pending_ssid.c_str(), g_pending_pass.c_str());
+    WiFi.setSleep(false);
+
+    const uint32_t now = millis();
+    g_last_wifi_poll_ms = now;
+    g_last_wifi_retry_ms = now;
+
+    Serial.printf(
+        "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"trying_new\",\"timeout_s\":%d}\n",
+        g_pending_ssid.c_str(),
+        g_wifi_last_countdown_sec);
+}
+
 static void initWifiAsync()
 {
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.begin(g_saved_ssid.c_str(), g_saved_pass.c_str());
     WiFi.setSleep(false);
 
+    ui_set_wifi_status(false, nullptr, g_saved_ssid.c_str(), 0);
     configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
     g_last_wifi_retry_ms = millis();
 
-    Serial.printf("{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"connecting\"}\n", WIFI_SSID);
+    Serial.printf(
+        "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"connecting\"}\n",
+        g_saved_ssid.c_str());
 }
 
 static void pollWifiAndClock()
@@ -661,14 +991,97 @@ static void pollWifiAndClock()
     if ((now - g_last_wifi_poll_ms) >= WIFI_POLL_INTERVAL_MS)
     {
         g_last_wifi_poll_ms = now;
-        const bool isConnected = (WiFi.status() == WL_CONNECTED);
+        const wl_status_t wifiStatus = WiFi.status();
+        const bool isConnected = (wifiStatus == WL_CONNECTED);
 
-        if (isConnected && !g_wifi_connected)
+        if (g_wifi_trying_new)
+        {
+            const uint32_t elapsed = now - g_wifi_attempt_start_ms;
+            if (isConnected)
+            {
+                // Nova rede conectou com sucesso -> grava permanentemente na NVS
+                g_saved_ssid = g_pending_ssid;
+                g_saved_pass = g_pending_pass;
+                saveWifiCredentialsToNvs(g_saved_ssid, g_saved_pass);
+
+                g_wifi_trying_new = false;
+                g_wifi_restoring = false;
+                g_pending_ssid = "";
+                g_pending_pass = "";
+                g_wifi_last_countdown_sec = -1;
+
+                g_wifi_connected = true;
+                g_wifi_ever_connected = true;
+                g_boot_rescue_active = false;
+                WiFi.setSleep(false);
+                const String ipStr = WiFi.localIP().toString();
+                const String activeSsid = WiFi.SSID().length() > 0 ? WiFi.SSID() : g_saved_ssid;
+                const int32_t rssi = WiFi.RSSI();
+                ui_set_wifi_status(true, ipStr.c_str(), activeSsid.c_str(), rssi);
+                ui_set_wifi_scan_status("Conectado! Nova rede salva na memoria.");
+                g_last_rssi_poll_ms = now;
+
+                configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+                startWebSocketServer();
+                g_last_udp_bcast_ms = now - UDP_BROADCAST_INTERVAL_MS;
+
+                Serial.printf(
+                    "{\"event\":\"wifi\",\"connected\":true,\"saved\":true,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%ld}\n",
+                    activeSsid.c_str(),
+                    ipStr.c_str(),
+                    static_cast<long>(rssi));
+            }
+            else if (elapsed >= WIFI_CONNECT_TIMEOUT_MS ||
+                     (wifiStatus == WL_CONNECT_FAILED && elapsed >= 3000))
+            {
+                restoreSavedWifi(elapsed >= WIFI_CONNECT_TIMEOUT_MS ? "timeout_12s" : "auth_failed");
+            }
+            else
+            {
+                const int remSec = static_cast<int>((WIFI_CONNECT_TIMEOUT_MS - elapsed + 999) / 1000);
+                if (remSec != g_wifi_last_countdown_sec)
+                {
+                    g_wifi_last_countdown_sec = remSec;
+                    char statusBuf[96];
+                    snprintf(
+                        statusBuf,
+                        sizeof(statusBuf),
+                        "Conectando a %s... (%ds)",
+                        g_pending_ssid.c_str(),
+                        remSec);
+                    ui_set_wifi_scan_status(statusBuf);
+                }
+            }
+        }
+        else if (isConnected && !g_wifi_connected)
         {
             g_wifi_connected = true;
+            g_wifi_ever_connected = true;
             WiFi.setSleep(false);
             const String ipStr = WiFi.localIP().toString();
-            ui_set_wifi_status(true, ipStr.c_str());
+            const String activeSsid = WiFi.SSID().length() > 0 ? WiFi.SSID() : g_saved_ssid;
+            const int32_t rssi = WiFi.RSSI();
+            ui_set_wifi_status(true, ipStr.c_str(), activeSsid.c_str(), rssi);
+            if (g_boot_rescue_active)
+            {
+                g_boot_rescue_active = false;
+                g_saved_ssid = DEFAULT_WIFI_SSID;
+                g_saved_pass = DEFAULT_WIFI_PASS;
+                saveWifiCredentialsToNvs(g_saved_ssid, g_saved_pass);
+                ui_set_wifi_scan_status("Conectado! Rede padrao restaurada.");
+            }
+            else if (g_wifi_restoring)
+            {
+                g_wifi_restoring = false;
+                char restoredBuf[64];
+                snprintf(restoredBuf, sizeof(restoredBuf), "Rede anterior restaurada: %s", activeSsid.c_str());
+                ui_set_wifi_scan_status(restoredBuf);
+            }
+            else
+            {
+                ui_set_wifi_scan_status("Conectado!");
+            }
+            g_last_rssi_poll_ms = now;
 
             configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
             startWebSocketServer();
@@ -677,23 +1090,51 @@ static void pollWifiAndClock()
             g_last_udp_bcast_ms = now - UDP_BROADCAST_INTERVAL_MS;
 
             Serial.printf(
-                "{\"event\":\"wifi\",\"connected\":true,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d}\n",
-                WIFI_SSID,
+                "{\"event\":\"wifi\",\"connected\":true,\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%ld}\n",
+                activeSsid.c_str(),
                 ipStr.c_str(),
-                WiFi.RSSI());
+                static_cast<long>(rssi));
+        }
+        else if (isConnected && g_wifi_connected && (now - g_last_rssi_poll_ms) >= WIFI_RSSI_POLL_INTERVAL_MS)
+        {
+            g_last_rssi_poll_ms = now;
+            const String ipStr = WiFi.localIP().toString();
+            const String activeSsid = WiFi.SSID().length() > 0 ? WiFi.SSID() : g_saved_ssid;
+            ui_set_wifi_status(true, ipStr.c_str(), activeSsid.c_str(), WiFi.RSSI());
         }
         else if (!isConnected && g_wifi_connected)
         {
             g_wifi_connected = false;
             g_ws_client_connected = false;
-            ui_set_wifi_status(false, nullptr);
+            ui_set_wifi_status(false, nullptr, g_saved_ssid.c_str(), 0);
             refreshConnectionBadge();
             Serial.println("{\"event\":\"wifi\",\"connected\":false,\"msg\":\"disconnected\"}");
         }
-        else if (!isConnected && (now - g_last_wifi_retry_ms) >= WIFI_RETRY_INTERVAL_MS)
+        else if (!isConnected && !g_wifi_scanning && !g_wifi_ever_connected &&
+                 !g_boot_rescue_active && !g_saved_ssid.equals(DEFAULT_WIFI_SSID) &&
+                 (now - g_last_wifi_retry_ms) >= WIFI_CONNECT_TIMEOUT_MS)
+        {
+            // Se a rede salva na NVS não conectar no boot em 12s, resgata automaticamente a rede padrão
+            g_boot_rescue_active = true;
+            g_last_wifi_retry_ms = now;
+            ui_set_wifi_status(false, nullptr, DEFAULT_WIFI_SSID, 0);
+            ui_set_wifi_scan_status("Falha na rede salva. Restaurando WIFI 2.4...");
+            WiFi.disconnect(false);
+            delay(50);
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(DEFAULT_WIFI_SSID, DEFAULT_WIFI_PASS);
+            WiFi.setSleep(false);
+            Serial.printf(
+                "{\"event\":\"wifi\",\"connected\":false,\"ssid\":\"%s\",\"msg\":\"boot_rescue_default\"}\n",
+                DEFAULT_WIFI_SSID);
+        }
+        else if (!isConnected && !g_wifi_scanning && (now - g_last_wifi_retry_ms) >= WIFI_RETRY_INTERVAL_MS)
         {
             g_last_wifi_retry_ms = now;
-            WiFi.reconnect();
+            const String &retrySsid = g_boot_rescue_active ? String(DEFAULT_WIFI_SSID) : g_saved_ssid;
+            const String &retryPass = g_boot_rescue_active ? String(DEFAULT_WIFI_PASS) : g_saved_pass;
+            WiFi.begin(retrySsid.c_str(), retryPass.c_str());
+            WiFi.setSleep(false);
         }
     }
 
@@ -710,6 +1151,22 @@ static void pollWifiAndClock()
             g_current_time_str[sizeof(g_current_time_str) - 1] = '\0';
 
             ui_set_clock_text(g_current_time_str);
+
+            static const char *DAYS_PT[7] = {"Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"};
+            static const char *MONTHS_PT[12] = {
+                "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+                "Jul", "Ago", "Set", "Out", "Nov", "Dez"
+            };
+            char dateBuf[32];
+            snprintf(
+                dateBuf,
+                sizeof(dateBuf),
+                "%s, %02d %s %04d",
+                DAYS_PT[timeinfo.tm_wday % 7],
+                timeinfo.tm_mday,
+                MONTHS_PT[timeinfo.tm_mon % 12],
+                timeinfo.tm_year + 1900);
+            ui_set_date_text(dateBuf);
 
             if (!g_ntp_synced)
             {
@@ -728,6 +1185,157 @@ static void pollWifiAndClock()
 }
 
 // ============================================================================
+// Controle de Brilho PWM (LEDC), Standby NVS, Métricas de Sistema e Reset
+// ============================================================================
+static void applyBacklightDuty(uint8_t percentage)
+{
+    if (percentage < 10) percentage = 10;
+    if (percentage > 100) percentage = 100;
+    const uint32_t duty = (static_cast<uint32_t>(percentage) * 255U + 50U) / 100U;
+    ledcWrite(LCD_BL_PWM_CHANNEL, duty);
+}
+
+void set_screen_brightness(uint8_t percentage)
+{
+    if (percentage < 10)
+    {
+        percentage = 10;
+    }
+    if (percentage > 100)
+    {
+        percentage = 100;
+    }
+    g_lcd_brightness = percentage;
+    if (!g_screensaver_dimmed)
+    {
+        applyBacklightDuty(g_lcd_brightness);
+    }
+}
+
+uint8_t get_screen_brightness()
+{
+    return g_lcd_brightness;
+}
+
+void save_screen_brightness(uint8_t percentage)
+{
+    set_screen_brightness(percentage);
+    g_prefs.begin(NVS_NAMESPACE, false);
+    g_prefs.putUChar("lcd_bright", g_lcd_brightness);
+    g_prefs.end();
+    Serial.printf(
+        "{\"event\":\"lcd_bright\",\"val\":%u,\"saved\":true}\n",
+        static_cast<unsigned>(g_lcd_brightness));
+}
+
+void set_screensaver_dim(bool dimmed)
+{
+    g_screensaver_dimmed = dimmed;
+    if (dimmed)
+    {
+        uint8_t dimPct = static_cast<uint8_t>((static_cast<uint16_t>(g_lcd_brightness) * 35U) / 100U);
+        if (dimPct < 12) dimPct = 12;
+        applyBacklightDuty(dimPct);
+    }
+    else
+    {
+        applyBacklightDuty(g_lcd_brightness);
+    }
+}
+
+uint8_t get_standby_minutes()
+{
+    return g_standby_minutes;
+}
+
+void set_standby_minutes(uint8_t minutes)
+{
+    if (minutes != 0 && minutes != 2 && minutes != 5 && minutes != 10)
+    {
+        minutes = DEFAULT_STANDBY_MINUTES;
+    }
+    g_standby_minutes = minutes;
+    g_last_user_touch_ms = millis();
+    g_prefs.begin(NVS_NAMESPACE, false);
+    g_prefs.putUChar("standby_min", g_standby_minutes);
+    g_prefs.end();
+    Serial.printf(
+        "{\"event\":\"standby\",\"minutes\":%u,\"saved\":true}\n",
+        static_cast<unsigned>(g_standby_minutes));
+}
+
+static void loadStandbySetting()
+{
+    g_prefs.begin(NVS_NAMESPACE, true);
+    uint8_t saved = g_prefs.getUChar("standby_min", DEFAULT_STANDBY_MINUTES);
+    g_prefs.end();
+    if (saved != 0 && saved != 2 && saved != 5 && saved != 10)
+    {
+        saved = DEFAULT_STANDBY_MINUTES;
+    }
+    g_standby_minutes = saved;
+}
+
+void restart_esp32_device()
+{
+    Serial.println("{\"event\":\"system\",\"action\":\"restart\"}");
+    Serial.flush();
+    delay(150);
+    ESP.restart();
+}
+
+static void initBacklightPwm()
+{
+    ledcSetup(LCD_BL_PWM_CHANNEL, LCD_BL_FREQ, LCD_BL_RES);
+    ledcAttachPin(LCD_BL_PIN, LCD_BL_PWM_CHANNEL);
+
+    g_prefs.begin(NVS_NAMESPACE, true);
+    const uint8_t saved = g_prefs.getUChar("lcd_bright", DEFAULT_LCD_BRIGHTNESS);
+    g_prefs.end();
+
+    set_screen_brightness(saved);
+}
+
+static void pollSystemMetricsAndStandby()
+{
+    const uint32_t now = millis();
+
+    if ((now - g_last_sys_metrics_ms) >= SYS_METRICS_POLL_MS)
+    {
+        g_last_sys_metrics_ms = now;
+        ui_set_system_metrics(
+            ESP.getFreeHeap() / 1024U,
+            ESP.getFreePsram() / 1024U,
+            ESP.getFreeSketchSpace() / 1024U,
+            g_ws_host_ip_str.c_str());
+    }
+
+    if (ui_is_screensaver_active())
+    {
+        return;
+    }
+
+    // Gatilho 1: Queda de WebSocket por mais de 20s (PC desligado/suspenso)
+    if (g_ws_ever_connected && !g_ws_client_connected && !g_ws_disconnect_ss_triggered &&
+        g_ws_disconnected_since_ms > 0 && (now - g_ws_disconnected_since_ms) >= WS_DISCONNECT_STANDBY_MS)
+    {
+        g_ws_disconnect_ss_triggered = true;
+        ui_enter_screensaver();
+        return;
+    }
+
+    // Gatilho 2: Tempo de Standby configurado pelo usuário sem toques na tela
+    if (g_standby_minutes > 0)
+    {
+        const uint32_t standbyMs = static_cast<uint32_t>(g_standby_minutes) * 60000UL;
+        if ((now - g_last_user_touch_ms) >= standbyMs)
+        {
+            ui_enter_screensaver();
+        }
+    }
+}
+
+// ============================================================================
 // Setup e Loop
 // ============================================================================
 void setup()
@@ -740,8 +1348,7 @@ void setup()
         delay(10);
     }
 
-    pinMode(GFX_BL, OUTPUT);
-    digitalWrite(GFX_BL, HIGH);
+    initBacklightPwm();
 
     if (!gfx->begin())
     {
@@ -781,13 +1388,25 @@ void setup()
     g_indev_drv.read_cb = my_touch_read;
     lv_indev_drv_register(&g_indev_drv);
 
+    loadWifiCredentials();
+    loadStandbySetting();
+    g_last_user_touch_ms = millis();
+
     ui_init(
         sendVolumeEvent,
         sendMuteToggleEvent,
         sendMediaAction,
         sendScreenChange,
         sendMacroAction,
-        sendLaunchGame);
+        sendLaunchGame,
+        sendTogglePcBluetooth,
+        startWifiScan,
+        saveAndConnectWifi);
+    ui_set_system_metrics(
+        ESP.getFreeHeap() / 1024U,
+        ESP.getFreePsram() / 1024U,
+        ESP.getFreeSketchSpace() / 1024U,
+        "");
     lv_timer_handler();
 
     initWifiAsync();
@@ -811,6 +1430,8 @@ void loop()
     }
     checkSerialHeartbeatTimeout();
     pollWifiAndClock();
+    pollWifiScan();
+    pollSystemMetricsAndStandby();
     pollUdpDiscovery();
     lv_timer_handler();
     delay(2);

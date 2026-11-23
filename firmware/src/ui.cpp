@@ -29,7 +29,7 @@ constexpr uint32_t HEX_OK           = 0x10B981;
 
 constexpr uint32_t SLIDER_THROTTLE_MS = 40;
 constexpr uint32_t TOAST_DURATION_MS  = 1600;
-constexpr int      NUM_SCREENS        = 7;
+constexpr int      NUM_SCREENS        = 12;
 
 struct ChannelUi {
     const char *target;
@@ -87,19 +87,19 @@ ChannelUi g_channels[4] = {
 
 // 6 Cards Minimalistas da Home (apenas ícone grande Phosphor 42px centralizado)
 const HubCardDef g_hub_cards[6] = {
-    HubCardDef("media",    "Mídia",    PH_ICN_MUSIC, HEX_ROSE, 0x3B1024, UI_SCREEN_MEDIA),
-    HubCardDef("mixer",    "Mixer",    PH_ICN_MIXER, HEX_CYAN, 0x083344, UI_SCREEN_AUDIO),
-    HubCardDef("light",    "Brilho",   PH_ICN_SMART, 0xFBBF24, 0x3B2608, -1),
-    HubCardDef("network",  "Rede",     PH_ICN_WIFI,  0x38BDF8, 0x0A2A43, -1),
-    HubCardDef("macros",   "Atalhos",  PH_ICN_APP,   0xA78BFA, 0x22184A, UI_SCREEN_MACROS),
-    HubCardDef("hardware", "Hardware", PH_ICN_CPU,   0x34D399, 0x064E3B, UI_SCREEN_HARDWARE),
+    HubCardDef("media",    "Mídia",        PH_ICN_MUSIC, HEX_ROSE, 0x3B1024, UI_SCREEN_MEDIA),
+    HubCardDef("mixer",    "Mixer",        PH_ICN_MIXER, HEX_CYAN, 0x083344, UI_SCREEN_AUDIO),
+    HubCardDef("light",    "Brilho",       PH_ICN_SMART, 0xFBBF24, 0x3B2608, UI_SCREEN_BRIGHTNESS),
+    HubCardDef("settings", "Configuração", PH_ICN_GEAR,  0x38BDF8, 0x0A2A43, UI_SCREEN_SETTINGS),
+    HubCardDef("macros",   "Atalhos",      PH_ICN_APP,   0xA78BFA, 0x22184A, UI_SCREEN_MACROS),
+    HubCardDef("hardware", "Hardware",     PH_ICN_CPU,   0x34D399, 0x064E3B, UI_SCREEN_HARDWARE),
 };
 
 // ============================================================================
 // Telas Principais e Widgets Persistentes
 // ============================================================================
-lv_obj_t *g_screens[NUM_SCREENS]      = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-lv_obj_t *g_header_clock[NUM_SCREENS] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+lv_obj_t *g_screens[NUM_SCREENS]      = {};
+lv_obj_t *g_header_clock[NUM_SCREENS] = {};
 HeaderMicWidgets g_header_mic[NUM_SCREENS];
 
 // Badge de conexão no centro do Header da Home
@@ -110,13 +110,28 @@ lv_obj_t *g_home_conn_label = nullptr;
 lv_obj_t *g_hud_header_icon  = nullptr;
 lv_obj_t *g_hud_header_title = nullptr;
 
-// Sliders laterais esquerdos persistentes (Home/Hardware/Atalhos/Jogos/HUD = Master, Mídia = Browser/Edge)
+// Sliders laterais esquerdos persistentes (Mídia = Browser, HUD = Game, demais = Master)
 SidebarWidgets g_home_sidebar;
 SidebarWidgets g_media_sidebar;
 SidebarWidgets g_hw_sidebar;
 SidebarWidgets g_macros_sidebar;
 SidebarWidgets g_games_sidebar;
 SidebarWidgets g_hud_sidebar;
+SidebarWidgets g_settings_sidebar;
+SidebarWidgets g_wifi_sidebar;
+SidebarWidgets g_bright_sidebar;
+SidebarWidgets g_sys_sidebar;
+
+SidebarWidgets *const g_master_sidebars[] = {
+    &g_home_sidebar,
+    &g_hw_sidebar,
+    &g_macros_sidebar,
+    &g_games_sidebar,
+    &g_settings_sidebar,
+    &g_wifi_sidebar,
+    &g_bright_sidebar,
+    &g_sys_sidebar,
+};
 
 // Toast flutuante da Home
 lv_obj_t *g_home_toast       = nullptr;
@@ -186,22 +201,86 @@ lv_obj_t *g_hud_gen_ram_lbl  = nullptr;
 lv_obj_t *g_hud_gen_disk_lbl = nullptr;
 lv_obj_t *g_hud_gen_disk_bar = nullptr;
 
-// Estado Global Compartilhado
-UiConnState g_conn_state = UI_CONN_WAITING;
-bool g_mic_muted         = false;
-bool g_media_playing     = false;
-bool g_wifi_connected    = false;
-bool g_hud_cs2_mode      = true;
-char g_wifi_ip[24]       = "";
-char g_last_clock[16]    = "--:--";
-bool g_syncing_from_pc   = false;
+// Widgets do Hub de Configurações (screen_settings)
+lv_obj_t *g_set_wifi_sub        = nullptr;
+lv_obj_t *g_set_bt_card         = nullptr;
+lv_obj_t *g_set_bt_accent       = nullptr;
+lv_obj_t *g_set_bt_icon         = nullptr;
+lv_obj_t *g_set_bt_sub          = nullptr;
+lv_obj_t *g_set_bt_pill         = nullptr;
+lv_obj_t *g_set_bt_pill_lbl     = nullptr;
+lv_obj_t *g_set_bright_sub      = nullptr;
+lv_obj_t *g_set_sys_sub         = nullptr;
 
-UiVolumeCallback     g_vol_cb         = nullptr;
-UiMuteCallback       g_mute_cb        = nullptr;
-UiMediaCallback      g_media_cb       = nullptr;
-UiScreenCallback     g_screen_cb      = nullptr;
-UiMacroCallback      g_macro_cb       = nullptr;
-UiLaunchGameCallback g_launch_game_cb = nullptr;
+// Widgets da Tela de Gerenciamento Wi-Fi (screen_wifi_manager)
+lv_obj_t *g_net_wifi_icon       = nullptr;
+lv_obj_t *g_net_ssid_lbl        = nullptr;
+lv_obj_t *g_net_rssi_lbl        = nullptr;
+lv_obj_t *g_net_ip_lbl          = nullptr;
+
+lv_obj_t *g_net_scan_btn        = nullptr;
+lv_obj_t *g_net_scan_status_lbl = nullptr;
+lv_obj_t *g_net_wifi_list       = nullptr;
+
+// Widgets da Tela de Brilho do Display (screen_brightness)
+lv_obj_t *g_bright_slider       = nullptr;
+lv_obj_t *g_bright_pct_lbl      = nullptr;
+lv_obj_t *g_bright_icon_box     = nullptr;
+
+// Widgets da Tela de Sistema / Info (screen_system_info)
+lv_obj_t *g_sys_wifi_lbl        = nullptr;
+lv_obj_t *g_sys_mem_lbl         = nullptr;
+lv_obj_t *g_sys_ws_lbl          = nullptr;
+lv_obj_t *g_sys_standby_lbl     = nullptr;
+lv_obj_t *g_sys_calib_lbl       = nullptr;
+lv_obj_t *g_sys_restart_lbl     = nullptr;
+
+// Widgets da Tela de Descanso Inteligente (screen_screensaver)
+lv_obj_t *g_ss_clock_lbl        = nullptr;
+lv_obj_t *g_ss_date_lbl         = nullptr;
+lv_obj_t *g_ss_weather_lbl      = nullptr;
+
+// Modal de Senha Wi-Fi + Teclado Virtual LVGL (overlay em screen_wifi_manager)
+lv_obj_t *g_wifi_modal          = nullptr;
+lv_obj_t *g_wifi_modal_title    = nullptr;
+lv_obj_t *g_wifi_pwd_ta         = nullptr;
+lv_obj_t *g_wifi_pwd_eye_lbl    = nullptr;
+lv_obj_t *g_wifi_kb             = nullptr;
+
+constexpr int MAX_WIFI_SCAN_RESULTS = 12;
+UiWifiNetwork g_wifi_scan_cache[MAX_WIFI_SCAN_RESULTS];
+int g_wifi_scan_count           = 0;
+char g_selected_ssid[33]        = "";
+
+// Estado Global Compartilhado
+UiScreenId g_active_screen         = UI_SCREEN_HOME;
+UiScreenId g_prev_screen_before_ss = UI_SCREEN_HOME;
+UiConnState g_conn_state           = UI_CONN_WAITING;
+bool g_mic_muted                   = false;
+bool g_media_playing               = false;
+bool g_pc_bt_enabled               = false;
+bool g_wifi_connected              = false;
+bool g_hud_cs2_mode                = true;
+char g_wifi_ip[24]                 = "";
+char g_ws_host_ip[24]              = "";
+char g_wifi_ssid_str[36]           = "Desconectado";
+int32_t g_wifi_rssi                = 0;
+char g_last_clock[16]              = "--:--";
+char g_last_date[32]               = "Aguardando data NTP...";
+char g_weather_city[32]            = "São Luís";
+int g_weather_temp                 = 0;
+bool g_has_weather                 = false;
+bool g_syncing_from_pc             = false;
+
+UiVolumeCallback      g_vol_cb          = nullptr;
+UiMuteCallback        g_mute_cb         = nullptr;
+UiMediaCallback       g_media_cb        = nullptr;
+UiScreenCallback      g_screen_cb       = nullptr;
+UiMacroCallback       g_macro_cb        = nullptr;
+UiLaunchGameCallback  g_launch_game_cb  = nullptr;
+UiPcBluetoothCallback g_pc_bt_cb        = nullptr;
+UiWifiScanCallback    g_wifi_scan_cb    = nullptr;
+UiWifiConnectCallback g_wifi_connect_cb = nullptr;
 
 // ============================================================================
 // Helpers Gerais
@@ -289,10 +368,10 @@ void update_channel_visuals(ChannelUi &ch)
 
     if (strcasecmp(ch.target, "master") == 0)
     {
-        update_sidebar_visuals(g_home_sidebar, ch, PH_ICN_VOL);
-        update_sidebar_visuals(g_hw_sidebar, ch, PH_ICN_VOL);
-        update_sidebar_visuals(g_macros_sidebar, ch, PH_ICN_VOL);
-        update_sidebar_visuals(g_games_sidebar, ch, PH_ICN_VOL);
+        for (SidebarWidgets *msb : g_master_sidebars)
+        {
+            update_sidebar_visuals(*msb, ch, PH_ICN_VOL);
+        }
     }
     else if (strcasecmp(ch.target, "browser") == 0)
     {
@@ -458,21 +537,12 @@ void sidebar_slider_cb(lv_event_t *e)
         }
         if (!is_browser && !is_game)
         {
-            if (sb != &g_home_sidebar && g_home_sidebar.slider)
+            for (SidebarWidgets *msb : g_master_sidebars)
             {
-                lv_slider_set_value(g_home_sidebar.slider, ch.value, LV_ANIM_OFF);
-            }
-            if (sb != &g_hw_sidebar && g_hw_sidebar.slider)
-            {
-                lv_slider_set_value(g_hw_sidebar.slider, ch.value, LV_ANIM_OFF);
-            }
-            if (sb != &g_macros_sidebar && g_macros_sidebar.slider)
-            {
-                lv_slider_set_value(g_macros_sidebar.slider, ch.value, LV_ANIM_OFF);
-            }
-            if (sb != &g_games_sidebar && g_games_sidebar.slider)
-            {
-                lv_slider_set_value(g_games_sidebar.slider, ch.value, LV_ANIM_OFF);
+                if (sb != msb && msb->slider)
+                {
+                    lv_slider_set_value(msb->slider, ch.value, LV_ANIM_OFF);
+                }
             }
         }
         g_syncing_from_pc = false;
@@ -526,21 +596,12 @@ void audio_slider_event_cb(lv_event_t *e)
         if (strcasecmp(ch->target, "master") == 0)
         {
             g_syncing_from_pc = true;
-            if (g_home_sidebar.slider)
+            for (SidebarWidgets *msb : g_master_sidebars)
             {
-                lv_slider_set_value(g_home_sidebar.slider, ch->value, LV_ANIM_OFF);
-            }
-            if (g_hw_sidebar.slider)
-            {
-                lv_slider_set_value(g_hw_sidebar.slider, ch->value, LV_ANIM_OFF);
-            }
-            if (g_macros_sidebar.slider)
-            {
-                lv_slider_set_value(g_macros_sidebar.slider, ch->value, LV_ANIM_OFF);
-            }
-            if (g_games_sidebar.slider)
-            {
-                lv_slider_set_value(g_games_sidebar.slider, ch->value, LV_ANIM_OFF);
+                if (msb->slider)
+                {
+                    lv_slider_set_value(msb->slider, ch->value, LV_ANIM_OFF);
+                }
             }
             g_syncing_from_pc = false;
         }
@@ -773,6 +834,425 @@ void game_card_click_cb(lv_event_t *e)
     {
         g_launch_game_cb(game->id);
     }
+}
+
+void update_standby_visuals()
+{
+    if (!g_sys_standby_lbl) return;
+    const uint8_t mins = get_standby_minutes();
+    if (mins == 0)
+    {
+        lv_label_set_text(g_sys_standby_lbl, "Desativado");
+        lv_obj_set_style_text_color(g_sys_standby_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+    }
+    else
+    {
+        char sbuf[20];
+        snprintf(sbuf, sizeof(sbuf), "%u min", static_cast<unsigned>(mins));
+        lv_label_set_text(g_sys_standby_lbl, sbuf);
+        lv_obj_set_style_text_color(g_sys_standby_lbl, lv_color_hex(0x38BDF8), 0);
+    }
+}
+
+void update_screensaver_weather_visuals()
+{
+    if (!g_ss_weather_lbl) return;
+    char wbuf[56];
+    if (g_has_weather)
+    {
+        snprintf(wbuf, sizeof(wbuf), "%s  •  %d°C", g_weather_city, g_weather_temp);
+    }
+    else
+    {
+        snprintf(wbuf, sizeof(wbuf), "%s  •  --°C", g_weather_city);
+    }
+    lv_label_set_text(g_ss_weather_lbl, wbuf);
+}
+
+void update_system_info_visuals()
+{
+    if (g_sys_wifi_lbl)
+    {
+        char wbuf[64];
+        if (g_wifi_connected)
+        {
+            snprintf(
+                wbuf,
+                sizeof(wbuf),
+                "%s  |  %s",
+                g_wifi_ssid_str[0] ? g_wifi_ssid_str : "Wi-Fi",
+                g_wifi_ip[0] ? g_wifi_ip : "--");
+            lv_obj_set_style_text_color(g_sys_wifi_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+        }
+        else
+        {
+            snprintf(wbuf, sizeof(wbuf), "Desconectado");
+            lv_obj_set_style_text_color(g_sys_wifi_lbl, lv_color_hex(HEX_WARN), 0);
+        }
+        lv_label_set_text(g_sys_wifi_lbl, wbuf);
+    }
+
+    if (g_sys_ws_lbl)
+    {
+        if (g_conn_state == UI_CONN_WIFI)
+        {
+            char hbuf[64];
+            if (g_ws_host_ip[0] != '\0')
+            {
+                snprintf(hbuf, sizeof(hbuf), "WS :81  •  PC %s", g_ws_host_ip);
+            }
+            else
+            {
+                snprintf(hbuf, sizeof(hbuf), "WS :81  •  PC Conectado");
+            }
+            lv_label_set_text(g_sys_ws_lbl, hbuf);
+            lv_obj_set_style_text_color(g_sys_ws_lbl, lv_color_hex(0x34D399), 0);
+        }
+        else if (g_conn_state == UI_CONN_SYNCED)
+        {
+            lv_label_set_text(g_sys_ws_lbl, "USB Serial  •  PC Conectado");
+            lv_obj_set_style_text_color(g_sys_ws_lbl, lv_color_hex(0x34D399), 0);
+        }
+        else
+        {
+            lv_label_set_text(g_sys_ws_lbl, "WS :81  •  Aguardando PC");
+            lv_obj_set_style_text_color(g_sys_ws_lbl, lv_color_hex(HEX_WARN), 0);
+        }
+    }
+}
+
+void update_brightness_visuals(uint8_t pct, bool sync_slider)
+{
+    if (pct < 10) pct = 10;
+    if (pct > 100) pct = 100;
+
+    char pbuf[16];
+    snprintf(pbuf, sizeof(pbuf), "%u%%", static_cast<unsigned>(pct));
+
+    if (g_bright_pct_lbl)
+    {
+        lv_label_set_text(g_bright_pct_lbl, pbuf);
+    }
+    if (sync_slider && g_bright_slider)
+    {
+        lv_slider_set_value(g_bright_slider, pct, LV_ANIM_OFF);
+    }
+    if (g_set_bright_sub)
+    {
+        char sbuf[28];
+        snprintf(sbuf, sizeof(sbuf), "Brilho: %u%%", static_cast<unsigned>(pct));
+        lv_label_set_text(g_set_bright_sub, sbuf);
+    }
+}
+
+void update_pc_bt_visuals()
+{
+    if (!g_set_bt_card || !g_set_bt_icon || !g_set_bt_sub || !g_set_bt_pill || !g_set_bt_pill_lbl) return;
+
+    if (g_pc_bt_enabled)
+    {
+        lv_obj_set_style_bg_color(g_set_bt_card, lv_color_hex(0x0B2545), 0);
+        lv_obj_set_style_border_color(g_set_bt_card, lv_color_hex(0x38BDF8), 0);
+        if (g_set_bt_accent)
+        {
+            lv_obj_set_style_bg_color(g_set_bt_accent, lv_color_hex(0x38BDF8), 0);
+        }
+        lv_label_set_text(g_set_bt_icon, PH_ICN_BT);
+        lv_obj_set_style_text_color(g_set_bt_icon, lv_color_hex(0x38BDF8), 0);
+        lv_label_set_text(g_set_bt_sub, "LIGADO (Toque p/ desligar)");
+        lv_obj_set_style_text_color(g_set_bt_sub, lv_color_hex(0x7DD3FC), 0);
+        lv_obj_set_style_bg_color(g_set_bt_pill, lv_color_hex(0x0284C7), 0);
+        lv_label_set_text(g_set_bt_pill_lbl, "ON");
+        lv_obj_set_style_text_color(g_set_bt_pill_lbl, lv_color_hex(0xFFFFFF), 0);
+    }
+    else
+    {
+        lv_obj_set_style_bg_color(g_set_bt_card, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_color(g_set_bt_card, lv_color_hex(HEX_CARD_BORDER), 0);
+        if (g_set_bt_accent)
+        {
+            lv_obj_set_style_bg_color(g_set_bt_accent, lv_color_hex(0x475569), 0);
+        }
+        lv_label_set_text(g_set_bt_icon, PH_ICN_BT_OFF);
+        lv_obj_set_style_text_color(g_set_bt_icon, lv_color_hex(HEX_TEXT_DIM), 0);
+        lv_label_set_text(g_set_bt_sub, "DESLIGADO (Toque p/ ligar)");
+        lv_obj_set_style_text_color(g_set_bt_sub, lv_color_hex(HEX_TEXT_DIM), 0);
+        lv_obj_set_style_bg_color(g_set_bt_pill, lv_color_hex(HEX_TRACK), 0);
+        lv_label_set_text(g_set_bt_pill_lbl, "OFF");
+        lv_obj_set_style_text_color(g_set_bt_pill_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+    }
+}
+
+void update_wifi_card_visuals()
+{
+    if (g_set_wifi_sub)
+    {
+        if (g_wifi_connected)
+        {
+            lv_label_set_text(g_set_wifi_sub, g_wifi_ssid_str[0] ? g_wifi_ssid_str : "Conectado");
+            lv_obj_set_style_text_color(g_set_wifi_sub, lv_color_hex(0x34D399), 0);
+        }
+        else
+        {
+            lv_label_set_text(g_set_wifi_sub, "Desconectado");
+            lv_obj_set_style_text_color(g_set_wifi_sub, lv_color_hex(HEX_WARN), 0);
+        }
+    }
+
+    update_system_info_visuals();
+
+    if (!g_net_wifi_icon || !g_net_ssid_lbl || !g_net_rssi_lbl || !g_net_ip_lbl) return;
+
+    if (g_wifi_connected)
+    {
+        lv_label_set_text(g_net_wifi_icon, PH_ICN_WIFI);
+        lv_obj_set_style_text_color(g_net_wifi_icon, lv_color_hex(0x34D399), 0);
+        lv_label_set_text(g_net_ssid_lbl, g_wifi_ssid_str[0] ? g_wifi_ssid_str : "Wi-Fi Conectado");
+        lv_obj_set_style_text_color(g_net_ssid_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+        char rbuf[24];
+        if (g_wifi_rssi < 0)
+        {
+            snprintf(rbuf, sizeof(rbuf), "%ld dBm", static_cast<long>(g_wifi_rssi));
+            uint32_t rcol = 0x34D399;
+            if (g_wifi_rssi <= -80) rcol = 0xEF4444;
+            else if (g_wifi_rssi <= -70) rcol = HEX_WARN;
+            lv_obj_set_style_text_color(g_net_rssi_lbl, lv_color_hex(rcol), 0);
+        }
+        else
+        {
+            snprintf(rbuf, sizeof(rbuf), "ONLINE");
+            lv_obj_set_style_text_color(g_net_rssi_lbl, lv_color_hex(0x34D399), 0);
+        }
+        lv_label_set_text(g_net_rssi_lbl, rbuf);
+
+        char ibuf[56];
+        snprintf(ibuf, sizeof(ibuf), "IP: %s  |  WS :81", g_wifi_ip[0] ? g_wifi_ip : "--");
+        lv_label_set_text(g_net_ip_lbl, ibuf);
+    }
+    else
+    {
+        lv_label_set_text(g_net_wifi_icon, PH_ICN_WIFI_OFF);
+        lv_obj_set_style_text_color(g_net_wifi_icon, lv_color_hex(HEX_WARN), 0);
+        lv_label_set_text(g_net_ssid_lbl, g_wifi_ssid_str[0] ? g_wifi_ssid_str : "Desconectado");
+        lv_obj_set_style_text_color(g_net_ssid_lbl, lv_color_hex(HEX_WARN), 0);
+        lv_label_set_text(g_net_rssi_lbl, "OFFLINE");
+        lv_obj_set_style_text_color(g_net_rssi_lbl, lv_color_hex(0xF87171), 0);
+        lv_label_set_text(g_net_ip_lbl, "IP: aguardando rede Wi-Fi...");
+    }
+}
+
+void pc_bt_toggle_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    // Feedback visual otimista; backend sincroniza o estado real logo em seguida
+    g_pc_bt_enabled = !g_pc_bt_enabled;
+    update_pc_bt_visuals();
+    if (g_pc_bt_cb)
+    {
+        g_pc_bt_cb();
+    }
+}
+
+void wifi_scan_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_net_scan_status_lbl)
+    {
+        lv_label_set_text(g_net_scan_status_lbl, "Escaneando...");
+        lv_obj_set_style_text_color(g_net_scan_status_lbl, lv_color_hex(HEX_CYAN), 0);
+    }
+    if (g_wifi_scan_cb)
+    {
+        g_wifi_scan_cb();
+    }
+}
+
+void close_wifi_modal()
+{
+    if (g_wifi_modal)
+    {
+        lv_obj_add_flag(g_wifi_modal, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void open_wifi_modal(const UiWifiNetwork &net)
+{
+    strncpy(g_selected_ssid, net.ssid, sizeof(g_selected_ssid) - 1);
+    g_selected_ssid[sizeof(g_selected_ssid) - 1] = '\0';
+
+    if (!net.secured)
+    {
+        // Rede aberta: conecta diretamente sem exigir senha
+        if (g_net_scan_status_lbl)
+        {
+            char sbuf[52];
+            snprintf(sbuf, sizeof(sbuf), "Conectando em %s...", g_selected_ssid);
+            lv_label_set_text(g_net_scan_status_lbl, sbuf);
+            lv_obj_set_style_text_color(g_net_scan_status_lbl, lv_color_hex(HEX_CYAN), 0);
+        }
+        if (g_wifi_connect_cb)
+        {
+            g_wifi_connect_cb(g_selected_ssid, "");
+        }
+        return;
+    }
+
+    if (g_wifi_modal_title)
+    {
+        char tbuf[56];
+        snprintf(tbuf, sizeof(tbuf), "Conectar a: %s", g_selected_ssid);
+        lv_label_set_text(g_wifi_modal_title, tbuf);
+    }
+    if (g_wifi_pwd_ta)
+    {
+        lv_textarea_set_text(g_wifi_pwd_ta, "");
+        lv_textarea_set_password_mode(g_wifi_pwd_ta, true);
+        lv_obj_add_state(g_wifi_pwd_ta, LV_STATE_FOCUSED);
+    }
+    if (g_wifi_pwd_eye_lbl)
+    {
+        lv_label_set_text(g_wifi_pwd_eye_lbl, LV_SYMBOL_EYE_OPEN);
+    }
+    if (g_wifi_kb)
+    {
+        lv_keyboard_set_mode(g_wifi_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+        lv_keyboard_set_textarea(g_wifi_kb, g_wifi_pwd_ta);
+    }
+    if (g_wifi_modal)
+    {
+        lv_obj_clear_flag(g_wifi_modal, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(g_wifi_modal);
+    }
+}
+
+void wifi_list_item_cb(lv_event_t *e)
+{
+    const int idx = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    if (idx < 0 || idx >= g_wifi_scan_count) return;
+    open_wifi_modal(g_wifi_scan_cache[idx]);
+}
+
+void wifi_modal_close_cb(lv_event_t *e)
+{
+    (void)e;
+    close_wifi_modal();
+}
+
+void wifi_pwd_eye_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!g_wifi_pwd_ta) return;
+    const bool hide = !lv_textarea_get_password_mode(g_wifi_pwd_ta);
+    lv_textarea_set_password_mode(g_wifi_pwd_ta, hide);
+    if (g_wifi_pwd_eye_lbl)
+    {
+        lv_label_set_text(g_wifi_pwd_eye_lbl, hide ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
+    }
+}
+
+void wifi_keyboard_event_cb(lv_event_t *e)
+{
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CANCEL)
+    {
+        close_wifi_modal();
+        return;
+    }
+    if (code == LV_EVENT_READY)
+    {
+        const char *pwd = g_wifi_pwd_ta ? lv_textarea_get_text(g_wifi_pwd_ta) : "";
+        close_wifi_modal();
+
+        if (g_net_scan_status_lbl)
+        {
+            char sbuf[52];
+            snprintf(sbuf, sizeof(sbuf), "Conectando em %s...", g_selected_ssid);
+            lv_label_set_text(g_net_scan_status_lbl, sbuf);
+            lv_obj_set_style_text_color(g_net_scan_status_lbl, lv_color_hex(HEX_CYAN), 0);
+        }
+        if (g_wifi_connect_cb && g_selected_ssid[0] != '\0')
+        {
+            g_wifi_connect_cb(g_selected_ssid, pwd);
+        }
+    }
+}
+
+void settings_nav_cb(lv_event_t *e)
+{
+    const auto target_id = static_cast<UiScreenId>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    ui_show_screen(target_id, true);
+}
+
+void brightness_slider_cb(lv_event_t *e)
+{
+    const lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *slider = lv_event_get_target(e);
+    if (!slider) return;
+
+    int val = static_cast<int>(lv_slider_get_value(slider));
+    if (val < 10) val = 10;
+    if (val > 100) val = 100;
+
+    update_brightness_visuals(static_cast<uint8_t>(val), false);
+
+    if (code == LV_EVENT_VALUE_CHANGED)
+    {
+        set_screen_brightness(static_cast<uint8_t>(val));
+    }
+    else if (code == LV_EVENT_RELEASED)
+    {
+        save_screen_brightness(static_cast<uint8_t>(val));
+    }
+}
+
+void brightness_preset_cb(lv_event_t *e)
+{
+    const int val = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    const uint8_t pct = static_cast<uint8_t>(val < 10 ? 10 : (val > 100 ? 100 : val));
+    update_brightness_visuals(pct, true);
+    save_screen_brightness(pct);
+}
+
+void standby_cycle_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    const uint8_t cur = get_standby_minutes();
+    uint8_t next = 2;
+    if (cur == 0) next = 2;
+    else if (cur == 2) next = 5;
+    else if (cur == 5) next = 10;
+    else next = 0;
+
+    set_standby_minutes(next);
+    update_standby_visuals();
+}
+
+void touch_calib_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_sys_calib_lbl)
+    {
+        lv_label_set_text(g_sys_calib_lbl, "I2C OK");
+        lv_obj_set_style_text_color(g_sys_calib_lbl, lv_color_hex(0x34D399), 0);
+    }
+}
+
+void screensaver_tap_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_wake_screensaver();
+}
+
+void system_restart_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_sys_restart_lbl)
+    {
+        lv_label_set_text(g_sys_restart_lbl, "REINICIANDO MINI DECK...");
+        lv_timer_handler();
+    }
+    restart_esp32_device();
 }
 
 // ============================================================================
@@ -1904,6 +2384,786 @@ void build_screen_game_hud()
     lv_obj_set_style_anim_time(g_hud_gen_disk_bar, 250, 0);
 }
 
+// ============================================================================
+// Helper: Botão Voltar para screen_settings (usado nas subtelas dedicadas)
+// ============================================================================
+lv_obj_t *build_back_to_settings_btn(lv_obj_t *parent, int16_t x, int16_t y, int16_t w, int16_t h)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_remove_style_all(btn);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_ext_click_area(btn, 6);
+    lv_obj_set_style_radius(btn, 10, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(HEX_BTN_IDLE), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x0A2A43), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x38BDF8), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(
+        btn,
+        settings_nav_cb,
+        LV_EVENT_CLICKED,
+        reinterpret_cast<void *>(static_cast<intptr_t>(UI_SCREEN_SETTINGS)));
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, LV_SYMBOL_LEFT " Voltar");
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+// ============================================================================
+// Tela 8: screen_settings (Hub de Configurações — Grade 2x2 Espaçada)
+// ============================================================================
+void build_screen_settings()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_SETTINGS] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_SETTINGS, PH_ICN_GEAR, "CONFIGURAÇÕES", 0x38BDF8);
+    build_volume_sidebar(scr, g_settings_sidebar, 0, PH_ICN_VOL, "GERAL");
+
+    // Grade 2x2 ampla: x=84..474 (390px), y=68..314 (246px) -> cards 190x118, gap 10px
+    constexpr int16_t GRID_X = 84;
+    constexpr int16_t GRID_Y = 68;
+    constexpr int16_t CARD_W = 190;
+    constexpr int16_t CARD_H = 118;
+    constexpr int16_t GAP_X  = 10;
+    constexpr int16_t GAP_Y  = 10;
+
+    auto create_settings_card = [&](
+        int col,
+        int row,
+        uint32_t accent_hex,
+        uint32_t press_bg_hex,
+        const char *icon_utf8,
+        const char *title_txt,
+        const char *init_sub_txt,
+        lv_obj_t *&out_accent,
+        lv_obj_t *&out_icon,
+        lv_obj_t *&out_sub) -> lv_obj_t * {
+        const int16_t x = GRID_X + col * (CARD_W + GAP_X);
+        const int16_t y = GRID_Y + row * (CARD_H + GAP_Y);
+
+        lv_obj_t *btn = lv_btn_create(scr);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_pos(btn, x, y);
+        lv_obj_set_size(btn, CARD_W, CARD_H);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(btn, 16, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(press_bg_hex), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(btn, 2, LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(btn, lv_color_hex(accent_hex), LV_STATE_PRESSED);
+
+        out_accent = lv_obj_create(btn);
+        lv_obj_remove_style_all(out_accent);
+        lv_obj_set_size(out_accent, 52, 3);
+        lv_obj_set_style_radius(out_accent, 2, 0);
+        lv_obj_set_style_bg_opa(out_accent, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(out_accent, lv_color_hex(accent_hex), 0);
+        lv_obj_align(out_accent, LV_ALIGN_TOP_MID, 0, 0);
+
+        out_icon = lv_label_create(btn);
+        lv_label_set_text(out_icon, icon_utf8);
+        lv_obj_set_style_text_font(out_icon, &phosphor_42, 0);
+        lv_obj_set_style_text_color(out_icon, lv_color_hex(accent_hex), 0);
+        lv_obj_align(out_icon, LV_ALIGN_TOP_MID, 0, 12);
+
+        lv_obj_t *title = lv_label_create(btn);
+        lv_label_set_text(title, title_txt);
+        lv_obj_set_style_text_font(title, &inter_bold_16, 0);
+        lv_obj_set_style_text_color(title, lv_color_hex(HEX_TEXT_MAIN), 0);
+        lv_obj_align(title, LV_ALIGN_BOTTOM_MID, 0, -28);
+
+        out_sub = lv_label_create(btn);
+        lv_label_set_text(out_sub, init_sub_txt);
+        lv_obj_set_width(out_sub, CARD_W - 18);
+        lv_label_set_long_mode(out_sub, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(out_sub, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(out_sub, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(out_sub, lv_color_hex(HEX_TEXT_DIM), 0);
+        lv_obj_align(out_sub, LV_ALIGN_BOTTOM_MID, 0, -9);
+
+        return btn;
+    };
+
+    // Card 1 (0,0): WI-FI -> abre screen_wifi_manager
+    lv_obj_t *wifi_acc = nullptr;
+    lv_obj_t *wifi_ic = nullptr;
+    lv_obj_t *wifi_btn = create_settings_card(
+        0, 0, 0x38BDF8, 0x0A2A43, PH_ICN_WIFI, "WI-FI", "Desconectado",
+        wifi_acc, wifi_ic, g_set_wifi_sub);
+    lv_obj_add_event_cb(
+        wifi_btn,
+        settings_nav_cb,
+        LV_EVENT_CLICKED,
+        reinterpret_cast<void *>(static_cast<intptr_t>(UI_SCREEN_WIFI)));
+
+    // Card 2 (1,0): BLUETOOTH PC -> toggle direto
+    g_set_bt_card = create_settings_card(
+        1, 0, 0x38BDF8, 0x0B2545, PH_ICN_BT_OFF, "BLUETOOTH PC", "DESLIGADO",
+        g_set_bt_accent, g_set_bt_icon, g_set_bt_sub);
+    lv_obj_set_style_border_width(g_set_bt_card, 2, 0);
+    lv_obj_add_event_cb(g_set_bt_card, pc_bt_toggle_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    g_set_bt_pill = lv_obj_create(g_set_bt_card);
+    lv_obj_remove_style_all(g_set_bt_pill);
+    lv_obj_set_size(g_set_bt_pill, 40, 20);
+    lv_obj_align(g_set_bt_pill, LV_ALIGN_TOP_RIGHT, -8, 8);
+    lv_obj_clear_flag(g_set_bt_pill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(g_set_bt_pill, 10, 0);
+    lv_obj_set_style_bg_opa(g_set_bt_pill, LV_OPA_COVER, 0);
+
+    g_set_bt_pill_lbl = lv_label_create(g_set_bt_pill);
+    lv_obj_set_style_text_font(g_set_bt_pill_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_center(g_set_bt_pill_lbl);
+
+    // Card 3 (0,1): TELA & BRILHO -> abre screen_brightness
+    lv_obj_t *br_acc = nullptr;
+    lv_obj_t *br_ic = nullptr;
+    lv_obj_t *bright_btn = create_settings_card(
+        0, 1, 0xF59E0B, 0x3B2308, PH_ICN_SMART, "TELA & BRILHO", "Brilho: 80%",
+        br_acc, br_ic, g_set_bright_sub);
+    lv_obj_add_event_cb(
+        bright_btn,
+        settings_nav_cb,
+        LV_EVENT_CLICKED,
+        reinterpret_cast<void *>(static_cast<intptr_t>(UI_SCREEN_BRIGHTNESS)));
+
+    // Card 4 (1,1): SISTEMA / INFO -> abre screen_system
+    lv_obj_t *sys_acc = nullptr;
+    lv_obj_t *sys_ic = nullptr;
+    lv_obj_t *sys_btn = create_settings_card(
+        1, 1, 0x34D399, 0x064E3B, PH_ICN_INFO, "SISTEMA", "v2.2  •  Info & Reset",
+        sys_acc, sys_ic, g_set_sys_sub);
+    lv_obj_add_event_cb(
+        sys_btn,
+        settings_nav_cb,
+        LV_EVENT_CLICKED,
+        reinterpret_cast<void *>(static_cast<intptr_t>(UI_SCREEN_SYSTEM)));
+}
+
+// ============================================================================
+// Tela 9: screen_wifi_manager (Tela Dedicada Wi-Fi + Scanner Amplo + Teclado)
+// ============================================================================
+void build_screen_wifi_manager()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_WIFI] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_WIFI, PH_ICN_WIFI, "GERENCIAR WI-FI", 0x38BDF8);
+    build_volume_sidebar(scr, g_wifi_sidebar, 0, PH_ICN_VOL, "GERAL");
+
+    // ---- Card Superior: Voltar + Status Atual (SSID, IP, RSSI) -> x=84, y=68, w=390, h=60 ----
+    lv_obj_t *wifi_card = lv_obj_create(scr);
+    lv_obj_remove_style_all(wifi_card);
+    lv_obj_set_pos(wifi_card, 84, 68);
+    lv_obj_set_size(wifi_card, 390, 60);
+    lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(wifi_card, 14, 0);
+    lv_obj_set_style_bg_opa(wifi_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(wifi_card, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(wifi_card, 1, 0);
+    lv_obj_set_style_border_color(wifi_card, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    lv_obj_t *wifi_accent = lv_obj_create(wifi_card);
+    lv_obj_remove_style_all(wifi_accent);
+    lv_obj_set_size(wifi_accent, 48, 3);
+    lv_obj_set_style_radius(wifi_accent, 2, 0);
+    lv_obj_set_style_bg_opa(wifi_accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(wifi_accent, lv_color_hex(0x38BDF8), 0);
+    lv_obj_align(wifi_accent, LV_ALIGN_TOP_MID, 0, 0);
+
+    build_back_to_settings_btn(wifi_card, 8, 10, 74, 40);
+
+    g_net_wifi_icon = lv_label_create(wifi_card);
+    lv_obj_set_pos(g_net_wifi_icon, 90, 9);
+    lv_obj_set_style_text_font(g_net_wifi_icon, &phosphor_20, 0);
+
+    g_net_ssid_lbl = lv_label_create(wifi_card);
+    lv_obj_set_pos(g_net_ssid_lbl, 116, 10);
+    lv_obj_set_width(g_net_ssid_lbl, 190);
+    lv_label_set_long_mode(g_net_ssid_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(g_net_ssid_lbl, &inter_bold_16, 0);
+
+    g_net_rssi_lbl = lv_label_create(wifi_card);
+    lv_obj_set_style_text_font(g_net_rssi_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_align(g_net_rssi_lbl, LV_ALIGN_TOP_RIGHT, -10, 12);
+
+    g_net_ip_lbl = lv_label_create(wifi_card);
+    lv_obj_set_pos(g_net_ip_lbl, 90, 36);
+    lv_obj_set_width(g_net_ip_lbl, 290);
+    lv_label_set_long_mode(g_net_ip_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(g_net_ip_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_net_ip_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    // ---- Card Principal Amplo: Scanner e Lista Confortável de Redes -> x=84, y=136, w=390, h=178 ----
+    lv_obj_t *scan_card = lv_obj_create(scr);
+    lv_obj_remove_style_all(scan_card);
+    lv_obj_set_pos(scan_card, 84, 136);
+    lv_obj_set_size(scan_card, 390, 178);
+    lv_obj_clear_flag(scan_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(scan_card, 14, 0);
+    lv_obj_set_style_bg_opa(scan_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scan_card, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(scan_card, 1, 0);
+    lv_obj_set_style_border_color(scan_card, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    g_net_scan_status_lbl = lv_label_create(scan_card);
+    lv_label_set_text(g_net_scan_status_lbl, "Toque em Escanear Redes");
+    lv_obj_set_pos(g_net_scan_status_lbl, 12, 14);
+    lv_obj_set_width(g_net_scan_status_lbl, 218);
+    lv_label_set_long_mode(g_net_scan_status_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_font(g_net_scan_status_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_net_scan_status_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    g_net_scan_btn = lv_btn_create(scan_card);
+    lv_obj_remove_style_all(g_net_scan_btn);
+    lv_obj_set_size(g_net_scan_btn, 144, 32);
+    lv_obj_align(g_net_scan_btn, LV_ALIGN_TOP_RIGHT, -8, 6);
+    lv_obj_set_style_radius(g_net_scan_btn, 9, 0);
+    lv_obj_set_style_bg_opa(g_net_scan_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_net_scan_btn, lv_color_hex(0x0A2A43), 0);
+    lv_obj_set_style_bg_color(g_net_scan_btn, lv_color_hex(0x0284C7), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(g_net_scan_btn, 1, 0);
+    lv_obj_set_style_border_color(g_net_scan_btn, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_layout(g_net_scan_btn, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(g_net_scan_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(g_net_scan_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(g_net_scan_btn, 5, 0);
+    lv_obj_add_event_cb(g_net_scan_btn, wifi_scan_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *scan_ic = lv_label_create(g_net_scan_btn);
+    lv_label_set_text(scan_ic, PH_ICN_SEARCH);
+    lv_obj_set_style_text_font(scan_ic, &phosphor_20, 0);
+    lv_obj_set_style_text_color(scan_ic, lv_color_hex(0x38BDF8), 0);
+
+    lv_obj_t *scan_txt = lv_label_create(g_net_scan_btn);
+    lv_label_set_text(scan_txt, "Escanear Redes");
+    lv_obj_set_style_text_font(scan_txt, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(scan_txt, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    g_net_wifi_list = lv_list_create(scan_card);
+    lv_obj_set_pos(g_net_wifi_list, 8, 44);
+    lv_obj_set_size(g_net_wifi_list, 374, 126);
+    lv_obj_set_style_radius(g_net_wifi_list, 10, 0);
+    lv_obj_set_style_bg_opa(g_net_wifi_list, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_net_wifi_list, lv_color_hex(HEX_BG), 0);
+    lv_obj_set_style_border_width(g_net_wifi_list, 1, 0);
+    lv_obj_set_style_border_color(g_net_wifi_list, lv_color_hex(HEX_TRACK), 0);
+    lv_obj_set_style_pad_all(g_net_wifi_list, 5, 0);
+    lv_obj_set_style_pad_row(g_net_wifi_list, 5, 0);
+
+    // ---- Modal Fullscreen Dedicado (480x320): Cabeçalho (76px) + Teclado (480x240) ----
+    g_wifi_modal = lv_obj_create(scr);
+    lv_obj_remove_style_all(g_wifi_modal);
+    lv_obj_set_pos(g_wifi_modal, 0, 0);
+    lv_obj_set_size(g_wifi_modal, 480, 320);
+    lv_obj_clear_flag(g_wifi_modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(g_wifi_modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_wifi_modal, lv_color_hex(0x050811), 0);
+    lv_obj_add_flag(g_wifi_modal, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *modal_header = lv_obj_create(g_wifi_modal);
+    lv_obj_remove_style_all(modal_header);
+    lv_obj_set_pos(modal_header, 0, 0);
+    lv_obj_set_size(modal_header, 480, 76);
+    lv_obj_clear_flag(modal_header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(modal_header, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(modal_header, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_side(modal_header, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(modal_header, 2, 0);
+    lv_obj_set_style_border_color(modal_header, lv_color_hex(0x38BDF8), 0);
+
+    g_wifi_modal_title = lv_label_create(modal_header);
+    lv_label_set_text(g_wifi_modal_title, "Conectar a: Wi-Fi");
+    lv_obj_set_pos(g_wifi_modal_title, 12, 6);
+    lv_obj_set_width(g_wifi_modal_title, 412);
+    lv_label_set_long_mode(g_wifi_modal_title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(g_wifi_modal_title, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_wifi_modal_title, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    lv_obj_t *close_btn = lv_btn_create(modal_header);
+    lv_obj_remove_style_all(close_btn);
+    lv_obj_set_size(close_btn, 38, 26);
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -10, 3);
+    lv_obj_set_style_radius(close_btn, 8, 0);
+    lv_obj_set_style_bg_opa(close_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x450A0A), 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x7F1D1D), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(close_btn, 1, 0);
+    lv_obj_set_style_border_color(close_btn, lv_color_hex(0xEF4444), 0);
+    lv_obj_add_event_cb(close_btn, wifi_modal_close_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *close_ic = lv_label_create(close_btn);
+    lv_label_set_text(close_ic, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(close_ic, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(close_ic, lv_color_hex(0xFCA5A5), 0);
+    lv_obj_center(close_ic);
+
+    g_wifi_pwd_ta = lv_textarea_create(modal_header);
+    lv_obj_set_pos(g_wifi_pwd_ta, 10, 31);
+    lv_obj_set_size(g_wifi_pwd_ta, 412, 40);
+    lv_textarea_set_one_line(g_wifi_pwd_ta, true);
+    lv_textarea_set_password_mode(g_wifi_pwd_ta, true);
+    lv_textarea_set_placeholder_text(g_wifi_pwd_ta, "Digite a senha do Wi-Fi...");
+    lv_obj_set_style_bg_color(g_wifi_pwd_ta, lv_color_hex(HEX_BG), 0);
+    lv_obj_set_style_text_color(g_wifi_pwd_ta, lv_color_hex(HEX_TEXT_MAIN), 0);
+    lv_obj_set_style_border_color(g_wifi_pwd_ta, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_border_width(g_wifi_pwd_ta, 1, 0);
+    lv_obj_set_style_radius(g_wifi_pwd_ta, 8, 0);
+    lv_obj_set_style_pad_ver(g_wifi_pwd_ta, 8, 0);
+    lv_obj_set_style_pad_hor(g_wifi_pwd_ta, 10, 0);
+    lv_obj_set_style_text_font(g_wifi_pwd_ta, &lv_font_montserrat_16, 0);
+
+    lv_obj_t *eye_btn = lv_btn_create(modal_header);
+    lv_obj_remove_style_all(eye_btn);
+    lv_obj_set_pos(eye_btn, 428, 31);
+    lv_obj_set_size(eye_btn, 42, 40);
+    lv_obj_set_style_radius(eye_btn, 8, 0);
+    lv_obj_set_style_bg_opa(eye_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(eye_btn, lv_color_hex(HEX_BTN_IDLE), 0);
+    lv_obj_set_style_border_width(eye_btn, 1, 0);
+    lv_obj_set_style_border_color(eye_btn, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_add_event_cb(eye_btn, wifi_pwd_eye_cb, LV_EVENT_CLICKED, nullptr);
+
+    g_wifi_pwd_eye_lbl = lv_label_create(eye_btn);
+    lv_label_set_text(g_wifi_pwd_eye_lbl, LV_SYMBOL_EYE_OPEN);
+    lv_obj_set_style_text_font(g_wifi_pwd_eye_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(g_wifi_pwd_eye_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+    lv_obj_center(g_wifi_pwd_eye_lbl);
+
+    // Teclado Virtual LVGL 480x240 ancorado exatamente na base (y=80..320 -> todas as 4 linhas completas)
+    g_wifi_kb = lv_keyboard_create(g_wifi_modal);
+    lv_obj_set_size(g_wifi_kb, 480, 240);
+    lv_obj_align(g_wifi_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_mode(g_wifi_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_keyboard_set_textarea(g_wifi_kb, g_wifi_pwd_ta);
+    lv_obj_set_style_bg_opa(g_wifi_kb, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_wifi_kb, lv_color_hex(HEX_BG), 0);
+    lv_obj_set_style_pad_all(g_wifi_kb, 4, 0);
+    lv_obj_set_style_pad_row(g_wifi_kb, 4, 0);
+    lv_obj_set_style_pad_column(g_wifi_kb, 4, 0);
+    lv_obj_set_style_bg_opa(g_wifi_kb, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(g_wifi_kb, lv_color_hex(HEX_CARD), LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(g_wifi_kb, lv_color_hex(0x0284C7), LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(g_wifi_kb, lv_color_hex(0x1E3A8A), LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(g_wifi_kb, lv_color_hex(HEX_TEXT_MAIN), LV_PART_ITEMS);
+    lv_obj_set_style_text_font(g_wifi_kb, &lv_font_montserrat_16, LV_PART_ITEMS);
+    lv_obj_set_style_border_color(g_wifi_kb, lv_color_hex(HEX_CARD_BORDER), LV_PART_ITEMS);
+    lv_obj_set_style_border_width(g_wifi_kb, 1, LV_PART_ITEMS);
+    lv_obj_set_style_radius(g_wifi_kb, 8, LV_PART_ITEMS);
+    lv_obj_add_event_cb(g_wifi_kb, wifi_keyboard_event_cb, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(g_wifi_kb, wifi_keyboard_event_cb, LV_EVENT_CANCEL, nullptr);
+}
+
+// ============================================================================
+// Tela 10: screen_brightness (Tela Dedicada para Brilho do Display via PWM)
+// ============================================================================
+void build_screen_brightness()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_BRIGHTNESS] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_BRIGHTNESS, PH_ICN_SMART, "TELA & BRILHO", 0xF59E0B);
+    build_volume_sidebar(scr, g_bright_sidebar, 0, PH_ICN_VOL, "GERAL");
+
+    lv_obj_t *card = lv_obj_create(scr);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_pos(card, 84, 68);
+    lv_obj_set_size(card, 390, 246);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    lv_obj_t *accent = lv_obj_create(card);
+    lv_obj_remove_style_all(accent);
+    lv_obj_set_size(accent, 64, 3);
+    lv_obj_set_style_radius(accent, 2, 0);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(0xF59E0B), 0);
+    lv_obj_align(accent, LV_ALIGN_TOP_MID, 0, 0);
+
+    build_back_to_settings_btn(card, 12, 12, 82, 34);
+
+    // Área Hero Central: Ícone grande de brilho + Porcentagem destacada
+    g_bright_icon_box = lv_obj_create(card);
+    lv_obj_remove_style_all(g_bright_icon_box);
+    lv_obj_set_pos(g_bright_icon_box, 108, 48);
+    lv_obj_set_size(g_bright_icon_box, 76, 76);
+    lv_obj_set_style_radius(g_bright_icon_box, 38, 0);
+    lv_obj_set_style_bg_opa(g_bright_icon_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_bright_icon_box, lv_color_hex(0x2D1E07), 0);
+    lv_obj_set_style_border_width(g_bright_icon_box, 2, 0);
+    lv_obj_set_style_border_color(g_bright_icon_box, lv_color_hex(0xF59E0B), 0);
+
+    lv_obj_t *hero_ic = lv_label_create(g_bright_icon_box);
+    lv_label_set_text(hero_ic, PH_ICN_SMART);
+    lv_obj_set_style_text_font(hero_ic, &phosphor_42, 0);
+    lv_obj_set_style_text_color(hero_ic, lv_color_hex(0xFBBF24), 0);
+    lv_obj_center(hero_ic);
+
+    g_bright_pct_lbl = lv_label_create(card);
+    lv_label_set_text(g_bright_pct_lbl, "80%");
+    lv_obj_set_pos(g_bright_pct_lbl, 200, 64);
+    lv_obj_set_style_text_font(g_bright_pct_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(g_bright_pct_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    lv_obj_t *hero_sub = lv_label_create(card);
+    lv_label_set_text(hero_sub, "BRILHO DO DISPLAY");
+    lv_obj_set_pos(hero_sub, 200, 96);
+    lv_obj_set_style_text_font(hero_sub, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(hero_sub, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    // Slider Horizontal Largo e Macio (10% a 100%, salva em NVS ao soltar)
+    const uint8_t init_bright = get_screen_brightness();
+    g_bright_slider = lv_slider_create(card);
+    lv_slider_set_range(g_bright_slider, 10, 100);
+    lv_slider_set_value(g_bright_slider, init_bright, LV_ANIM_OFF);
+    lv_obj_set_pos(g_bright_slider, 24, 152);
+    lv_obj_set_size(g_bright_slider, 342, 18);
+    lv_obj_set_ext_click_area(g_bright_slider, 18);
+    lv_obj_set_style_radius(g_bright_slider, 9, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_bright_slider, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_bright_slider, lv_color_hex(HEX_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_radius(g_bright_slider, 9, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(g_bright_slider, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(g_bright_slider, lv_color_hex(0xF59E0B), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_color(g_bright_slider, lv_color_hex(0xFDE047), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_dir(g_bright_slider, LV_GRAD_DIR_HOR, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(g_bright_slider, LV_OPA_COVER, LV_PART_KNOB);
+    lv_obj_set_style_bg_color(g_bright_slider, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_set_style_border_width(g_bright_slider, 3, LV_PART_KNOB);
+    lv_obj_set_style_border_color(g_bright_slider, lv_color_hex(0xF59E0B), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(g_bright_slider, 7, LV_PART_KNOB);
+    lv_obj_add_event_cb(g_bright_slider, brightness_slider_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_add_event_cb(g_bright_slider, brightness_slider_cb, LV_EVENT_RELEASED, nullptr);
+
+    // 3 Botões Rápidos de Brilho na base: [ 25% ] [ 60% ] [ 100% ]
+    static constexpr int PRESETS[3] = {25, 60, 100};
+    static const char *PRESET_LABELS[3] = {"25% Noite", "60% Médio", "100% Máx"};
+    for (int i = 0; i < 3; ++i)
+    {
+        lv_obj_t *pbtn = lv_btn_create(card);
+        lv_obj_remove_style_all(pbtn);
+        lv_obj_set_pos(pbtn, 18 + i * 120, 196);
+        lv_obj_set_size(pbtn, 112, 36);
+        lv_obj_set_style_radius(pbtn, 10, 0);
+        lv_obj_set_style_bg_opa(pbtn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(pbtn, lv_color_hex(HEX_BTN_IDLE), 0);
+        lv_obj_set_style_bg_color(pbtn, lv_color_hex(0x3B2308), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(pbtn, 1, 0);
+        lv_obj_set_style_border_color(pbtn, lv_color_hex(HEX_CARD_BORDER), 0);
+        lv_obj_set_style_border_color(pbtn, lv_color_hex(0xF59E0B), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(
+            pbtn,
+            brightness_preset_cb,
+            LV_EVENT_CLICKED,
+            reinterpret_cast<void *>(static_cast<intptr_t>(PRESETS[i])));
+
+        lv_obj_t *plbl = lv_label_create(pbtn);
+        lv_label_set_text(plbl, PRESET_LABELS[i]);
+        lv_obj_set_style_text_font(plbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(plbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+        lv_obj_center(plbl);
+    }
+
+    update_brightness_visuals(init_bright, true);
+}
+
+// ============================================================================
+// Tela 11: screen_system_info (Central Completa do Sistema — Lista Rolável)
+// ============================================================================
+void build_screen_system()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_SYSTEM] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    build_universal_header(scr, UI_SCREEN_SYSTEM, PH_ICN_INFO, "SISTEMA / INFO", 0x34D399);
+    build_volume_sidebar(scr, g_sys_sidebar, 0, PH_ICN_VOL, "GERAL");
+
+    // Barra superior fixa com botão Voltar + Versão (x=84, y=68, w=390, h=42)
+    lv_obj_t *top_bar = lv_obj_create(scr);
+    lv_obj_remove_style_all(top_bar);
+    lv_obj_set_pos(top_bar, 84, 68);
+    lv_obj_set_size(top_bar, 390, 42);
+    lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(top_bar, 12, 0);
+    lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(top_bar, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(top_bar, 1, 0);
+    lv_obj_set_style_border_color(top_bar, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    build_back_to_settings_btn(top_bar, 6, 5, 78, 32);
+
+    lv_obj_t *app_title = lv_label_create(top_bar);
+    lv_label_set_text(app_title, "MINI DECK IoT");
+    lv_obj_set_pos(app_title, 96, 11);
+    lv_obj_set_style_text_font(app_title, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(app_title, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    lv_obj_t *ver_pill = lv_obj_create(top_bar);
+    lv_obj_remove_style_all(ver_pill);
+    lv_obj_set_size(ver_pill, 58, 24);
+    lv_obj_align(ver_pill, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_set_style_radius(ver_pill, 12, 0);
+    lv_obj_set_style_bg_opa(ver_pill, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(ver_pill, lv_color_hex(0x064E3B), 0);
+    lv_obj_set_style_border_width(ver_pill, 1, 0);
+    lv_obj_set_style_border_color(ver_pill, lv_color_hex(0x34D399), 0);
+
+    lv_obj_t *ver_lbl = lv_label_create(ver_pill);
+    lv_label_set_text(ver_lbl, "v2.2");
+    lv_obj_set_style_text_font(ver_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(ver_lbl, lv_color_hex(0x34D399), 0);
+    lv_obj_center(ver_lbl);
+
+    // Container vertical rolável com cards espaçados (x=84, y=116, w=390, h=198)
+    lv_obj_t *list = lv_obj_create(scr);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_pos(list, 84, 116);
+    lv_obj_set_size(list, 390, 198);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_layout(list, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(list, 8, 0);
+    lv_obj_set_style_pad_bottom(list, 6, 0);
+
+    auto create_sys_row = [&](int16_t h) -> lv_obj_t * {
+        lv_obj_t *row = lv_obj_create(list);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, 386, h);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(row, 12, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_hex(HEX_CARD_BORDER), 0);
+        return row;
+    };
+
+    auto add_info_card = [&](const char *title_txt, const char *init_val) -> lv_obj_t * {
+        lv_obj_t *row = create_sys_row(48);
+
+        lv_obj_t *t = lv_label_create(row);
+        lv_label_set_text(t, title_txt);
+        lv_obj_set_pos(t, 12, 6);
+        lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(t, lv_color_hex(HEX_TEXT_DIM), 0);
+
+        lv_obj_t *v = lv_label_create(row);
+        lv_label_set_text(v, init_val);
+        lv_obj_set_pos(v, 12, 24);
+        lv_obj_set_width(v, 362);
+        lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(v, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(v, lv_color_hex(HEX_TEXT_MAIN), 0);
+        return v;
+    };
+
+    // 1. Hardware & Firmware
+    add_info_card("Hardware & Firmware", "JC3248W535C (ESP32-S3)  |  Firmware v2.2");
+
+    // 2. Memória Livre (Heap + PSRAM + Flash)
+    g_sys_mem_lbl = add_info_card("Memória Livre (RAM / PSRAM / Flash)", "Calculando memória...");
+
+    // 3. Conexão Host (WebSocket + IP do Windows) & Wi-Fi local
+    g_sys_ws_lbl   = add_info_card("Conexão Host (WebSocket)", "WS :81  •  Aguardando PC");
+    g_sys_wifi_lbl = add_info_card("Rede Wi-Fi do Mini Deck", "Desconectado");
+
+    // 4. Standby / Auto-Sleep (seletor: Desativado / 2 min / 5 min / 10 min)
+    lv_obj_t *standby_row = create_sys_row(52);
+    lv_obj_t *st_title = lv_label_create(standby_row);
+    lv_label_set_text(st_title, "Standby / Auto-Sleep");
+    lv_obj_set_pos(st_title, 12, 8);
+    lv_obj_set_style_text_font(st_title, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(st_title, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    lv_obj_t *st_sub = lv_label_create(standby_row);
+    lv_label_set_text(st_sub, "Descanso de tela automático");
+    lv_obj_set_pos(st_sub, 12, 29);
+    lv_obj_set_style_text_font(st_sub, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(st_sub, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    lv_obj_t *st_btn = lv_btn_create(standby_row);
+    lv_obj_remove_style_all(st_btn);
+    lv_obj_set_size(st_btn, 114, 34);
+    lv_obj_align(st_btn, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_set_style_radius(st_btn, 10, 0);
+    lv_obj_set_style_bg_opa(st_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(st_btn, lv_color_hex(0x0A2A43), 0);
+    lv_obj_set_style_bg_color(st_btn, lv_color_hex(0x0284C7), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(st_btn, 1, 0);
+    lv_obj_set_style_border_color(st_btn, lv_color_hex(0x38BDF8), 0);
+    lv_obj_add_event_cb(st_btn, standby_cycle_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    g_sys_standby_lbl = lv_label_create(st_btn);
+    lv_obj_set_style_text_font(g_sys_standby_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(g_sys_standby_lbl);
+
+    // 5. Calibração Touch (reservado para rotina touch)
+    lv_obj_t *calib_row = create_sys_row(50);
+    lv_obj_t *cb_title = lv_label_create(calib_row);
+    lv_label_set_text(cb_title, "Calibração Touch");
+    lv_obj_set_pos(cb_title, 12, 8);
+    lv_obj_set_style_text_font(cb_title, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(cb_title, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    lv_obj_t *cb_sub = lv_label_create(calib_row);
+    lv_label_set_text(cb_sub, "Capacitivo AXS15231B (I2C)");
+    lv_obj_set_pos(cb_sub, 12, 28);
+    lv_obj_set_style_text_font(cb_sub, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(cb_sub, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    lv_obj_t *cb_btn = lv_btn_create(calib_row);
+    lv_obj_remove_style_all(cb_btn);
+    lv_obj_set_size(cb_btn, 114, 34);
+    lv_obj_align(cb_btn, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_set_style_radius(cb_btn, 10, 0);
+    lv_obj_set_style_bg_opa(cb_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(cb_btn, lv_color_hex(HEX_BTN_IDLE), 0);
+    lv_obj_set_style_bg_color(cb_btn, lv_color_hex(0x064E3B), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(cb_btn, 1, 0);
+    lv_obj_set_style_border_color(cb_btn, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_add_event_cb(cb_btn, touch_calib_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    g_sys_calib_lbl = lv_label_create(cb_btn);
+    lv_label_set_text(g_sys_calib_lbl, "Calibrar");
+    lv_obj_set_style_text_font(g_sys_calib_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_sys_calib_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+    lv_obj_center(g_sys_calib_lbl);
+
+    // 6. Botão Seguro de Reiniciar Mini Deck
+    lv_obj_t *rst_btn = lv_btn_create(list);
+    lv_obj_remove_style_all(rst_btn);
+    lv_obj_set_size(rst_btn, 386, 48);
+    lv_obj_set_style_radius(rst_btn, 12, 0);
+    lv_obj_set_style_bg_opa(rst_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(rst_btn, lv_color_hex(0x450A0A), 0);
+    lv_obj_set_style_bg_color(rst_btn, lv_color_hex(0x991B1B), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(rst_btn, 2, 0);
+    lv_obj_set_style_border_color(rst_btn, lv_color_hex(0xEF4444), 0);
+    lv_obj_set_layout(rst_btn, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(rst_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(rst_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(rst_btn, 10, 0);
+    lv_obj_add_event_cb(rst_btn, system_restart_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *rst_ic = lv_label_create(rst_btn);
+    lv_label_set_text(rst_ic, PH_ICN_POWER);
+    lv_obj_set_style_text_font(rst_ic, &phosphor_20, 0);
+    lv_obj_set_style_text_color(rst_ic, lv_color_hex(0xFCA5A5), 0);
+
+    g_sys_restart_lbl = lv_label_create(rst_btn);
+    lv_label_set_text(g_sys_restart_lbl, "REINICIAR MINI DECK");
+    lv_obj_set_style_text_font(g_sys_restart_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_sys_restart_lbl, lv_color_hex(0xFEE2E2), 0);
+
+    update_standby_visuals();
+    update_pc_bt_visuals();
+    update_wifi_card_visuals();
+    update_system_info_visuals();
+}
+
+// ============================================================================
+// Tela 12: screen_screensaver (Descanso de Tela Inteligente — Relógio + Clima)
+// ============================================================================
+void build_screen_screensaver()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_SCREENSAVER] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x03060E), 0);
+    lv_obj_add_event_cb(scr, screensaver_tap_cb, LV_EVENT_CLICKED, nullptr);
+
+    // Detalhe sutil no topo
+    lv_obj_t *top_line = lv_obj_create(scr);
+    lv_obj_remove_style_all(top_line);
+    lv_obj_set_size(top_line, 72, 3);
+    lv_obj_set_style_radius(top_line, 2, 0);
+    lv_obj_set_style_bg_opa(top_line, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(top_line, lv_color_hex(HEX_CYAN), 0);
+    lv_obj_align(top_line, LV_ALIGN_TOP_MID, 0, 34);
+    lv_obj_clear_flag(top_line, LV_OBJ_FLAG_CLICKABLE);
+
+    // Relógio Digital Grande Centralizado (48px)
+    g_ss_clock_lbl = lv_label_create(scr);
+    lv_label_set_text(g_ss_clock_lbl, g_last_clock);
+    lv_obj_set_style_text_font(g_ss_clock_lbl, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(g_ss_clock_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+    lv_obj_set_style_text_letter_space(g_ss_clock_lbl, 4, 0);
+    lv_obj_align(g_ss_clock_lbl, LV_ALIGN_CENTER, 0, -36);
+    lv_obj_clear_flag(g_ss_clock_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+    // Data NTP logo abaixo do relógio
+    g_ss_date_lbl = lv_label_create(scr);
+    lv_label_set_text(g_ss_date_lbl, g_last_date);
+    lv_obj_set_style_text_font(g_ss_date_lbl, &inter_medium_16, 0);
+    lv_obj_set_style_text_color(g_ss_date_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+    lv_obj_align(g_ss_date_lbl, LV_ALIGN_CENTER, 0, 22);
+    lv_obj_clear_flag(g_ss_date_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+    // Pílula de Clima (São Luís • 30°C)
+    lv_obj_t *weather_pill = lv_obj_create(scr);
+    lv_obj_remove_style_all(weather_pill);
+    lv_obj_set_size(weather_pill, 228, 38);
+    lv_obj_align(weather_pill, LV_ALIGN_CENTER, 0, 72);
+    lv_obj_set_style_radius(weather_pill, 19, 0);
+    lv_obj_set_style_bg_opa(weather_pill, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(weather_pill, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_border_width(weather_pill, 1, 0);
+    lv_obj_set_style_border_color(weather_pill, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_layout(weather_pill, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(weather_pill, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(weather_pill, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(weather_pill, 8, 0);
+    lv_obj_clear_flag(weather_pill, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *w_ic = lv_label_create(weather_pill);
+    lv_label_set_text(w_ic, PH_ICN_SMART);
+    lv_obj_set_style_text_font(w_ic, &phosphor_20, 0);
+    lv_obj_set_style_text_color(w_ic, lv_color_hex(0xFBBF24), 0);
+
+    g_ss_weather_lbl = lv_label_create(weather_pill);
+    lv_obj_set_style_text_font(g_ss_weather_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(g_ss_weather_lbl, lv_color_hex(0xE2E8F0), 0);
+
+    // Aviso discreto na base
+    lv_obj_t *hint = lv_label_create(scr);
+    lv_label_set_text(hint, "Toque na tela para acordar");
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x334155), 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -14);
+    lv_obj_clear_flag(hint, LV_OBJ_FLAG_CLICKABLE);
+
+    update_screensaver_weather_visuals();
+}
+
 void apply_home_conn_badge_style(UiConnState state)
 {
     if (!g_home_conn_badge || !g_home_conn_label) return;
@@ -1945,6 +3205,7 @@ void apply_home_conn_badge_style(UiConnState state)
     lv_obj_set_style_border_color(g_home_conn_badge, lv_color_hex(bdr_hex), 0);
     lv_label_set_text(g_home_conn_label, txt);
     lv_obj_set_style_text_color(g_home_conn_label, lv_color_hex(txt_hex), 0);
+    update_system_info_visuals();
 }
 
 } // namespace
@@ -1958,7 +3219,10 @@ void ui_init(
     UiMediaCallback on_media_action,
     UiScreenCallback on_screen_change,
     UiMacroCallback on_macro_action,
-    UiLaunchGameCallback on_launch_game)
+    UiLaunchGameCallback on_launch_game,
+    UiPcBluetoothCallback on_pc_bt_toggle,
+    UiWifiScanCallback on_wifi_scan,
+    UiWifiConnectCallback on_wifi_connect)
 {
     g_vol_cb = on_volume_change;
     g_mute_cb = on_mute_toggle;
@@ -1966,6 +3230,9 @@ void ui_init(
     g_screen_cb = on_screen_change;
     g_macro_cb = on_macro_action;
     g_launch_game_cb = on_launch_game;
+    g_pc_bt_cb = on_pc_bt_toggle;
+    g_wifi_scan_cb = on_wifi_scan;
+    g_wifi_connect_cb = on_wifi_connect;
 
     build_screen_home();
     build_screen_audio();
@@ -1974,17 +3241,23 @@ void ui_init(
     build_screen_macros();
     build_screen_games();
     build_screen_game_hud();
+    build_screen_settings();
+    build_screen_wifi_manager();
+    build_screen_brightness();
+    build_screen_system();
+    build_screen_screensaver();
 
     update_mic_visuals();
-    update_sidebar_visuals(g_home_sidebar, g_channels[0], PH_ICN_VOL);
+    for (SidebarWidgets *msb : g_master_sidebars)
+    {
+        update_sidebar_visuals(*msb, g_channels[0], PH_ICN_VOL);
+    }
     update_sidebar_visuals(g_media_sidebar, g_channels[1], PH_ICN_BROWSER);
-    update_sidebar_visuals(g_hw_sidebar, g_channels[0], PH_ICN_VOL);
-    update_sidebar_visuals(g_macros_sidebar, g_channels[0], PH_ICN_VOL);
-    update_sidebar_visuals(g_games_sidebar, g_channels[0], PH_ICN_VOL);
     update_sidebar_visuals(g_hud_sidebar, g_channels[3], PH_ICN_GAME);
     update_media_play_visuals();
     apply_home_conn_badge_style(UI_CONN_WAITING);
 
+    g_active_screen = UI_SCREEN_HOME;
     lv_scr_load(g_screens[UI_SCREEN_HOME]);
 }
 
@@ -1995,6 +3268,9 @@ void ui_show_screen(UiScreenId screen_id, bool animate)
     lv_obj_t *target = g_screens[screen_id];
     if (!target || lv_scr_act() == target) return;
 
+    close_wifi_modal();
+    g_active_screen = screen_id;
+
     if (animate)
     {
         lv_scr_load_anim(target, LV_SCR_LOAD_ANIM_FADE_ON, 160, 0, false);
@@ -2004,7 +3280,7 @@ void ui_show_screen(UiScreenId screen_id, bool animate)
         lv_scr_load(target);
     }
 
-    if (g_screen_cb)
+    if (g_screen_cb && screen_id != UI_SCREEN_SCREENSAVER)
     {
         const char *name = "home";
         if (screen_id == UI_SCREEN_AUDIO) name = "audio";
@@ -2013,6 +3289,10 @@ void ui_show_screen(UiScreenId screen_id, bool animate)
         else if (screen_id == UI_SCREEN_MACROS) name = "macros";
         else if (screen_id == UI_SCREEN_GAMES) name = "games";
         else if (screen_id == UI_SCREEN_GAME_HUD) name = "game_hud";
+        else if (screen_id == UI_SCREEN_SETTINGS) name = "settings";
+        else if (screen_id == UI_SCREEN_WIFI) name = "wifi";
+        else if (screen_id == UI_SCREEN_BRIGHTNESS) name = "brightness";
+        else if (screen_id == UI_SCREEN_SYSTEM) name = "system";
         g_screen_cb(name);
     }
 }
@@ -2025,9 +3305,22 @@ void ui_sync_volume(const char *target, int value)
     const bool is_master  = (strcasecmp(ch->target, "master") == 0);
     const bool is_browser = (strcasecmp(ch->target, "browser") == 0);
     const bool is_game    = (strcasecmp(ch->target, "game") == 0);
+
+    bool master_dragging = false;
+    if (is_master)
+    {
+        for (SidebarWidgets *msb : g_master_sidebars)
+        {
+            if (msb->dragging)
+            {
+                master_dragging = true;
+                break;
+            }
+        }
+    }
+
     if (ch->dragging ||
-        (is_master && (g_home_sidebar.dragging || g_hw_sidebar.dragging ||
-                       g_macros_sidebar.dragging || g_games_sidebar.dragging)) ||
+        master_dragging ||
         (is_browser && g_media_sidebar.dragging) ||
         (is_game && g_hud_sidebar.dragging))
     {
@@ -2045,21 +3338,12 @@ void ui_sync_volume(const char *target, int value)
     }
     if (is_master)
     {
-        if (g_home_sidebar.slider)
+        for (SidebarWidgets *msb : g_master_sidebars)
         {
-            lv_slider_set_value(g_home_sidebar.slider, clamped, LV_ANIM_OFF);
-        }
-        if (g_hw_sidebar.slider)
-        {
-            lv_slider_set_value(g_hw_sidebar.slider, clamped, LV_ANIM_OFF);
-        }
-        if (g_macros_sidebar.slider)
-        {
-            lv_slider_set_value(g_macros_sidebar.slider, clamped, LV_ANIM_OFF);
-        }
-        if (g_games_sidebar.slider)
-        {
-            lv_slider_set_value(g_games_sidebar.slider, clamped, LV_ANIM_OFF);
+            if (msb->slider)
+            {
+                lv_slider_set_value(msb->slider, clamped, LV_ANIM_OFF);
+            }
         }
     }
     if (is_browser && g_media_sidebar.slider)
@@ -2488,6 +3772,12 @@ void ui_sync_cs2_c4(const char *state, int time_left)
     }
 }
 
+void ui_sync_pc_bluetooth(bool enabled)
+{
+    g_pc_bt_enabled = enabled;
+    update_pc_bt_visuals();
+}
+
 void ui_set_conn_state(UiConnState state)
 {
     if (g_conn_state == state) return;
@@ -2505,9 +3795,22 @@ void ui_set_status_text(const char *text)
     (void)text;
 }
 
-void ui_set_wifi_status(bool connected, const char *ip_str)
+void ui_set_wifi_status(bool connected, const char *ip_str, const char *ssid, int32_t rssi)
 {
     g_wifi_connected = connected;
+    g_wifi_rssi = rssi;
+
+    if (ssid && ssid[0] != '\0')
+    {
+        strncpy(g_wifi_ssid_str, ssid, sizeof(g_wifi_ssid_str) - 1);
+        g_wifi_ssid_str[sizeof(g_wifi_ssid_str) - 1] = '\0';
+    }
+    else if (!connected)
+    {
+        strncpy(g_wifi_ssid_str, "Desconectado", sizeof(g_wifi_ssid_str) - 1);
+        g_wifi_ssid_str[sizeof(g_wifi_ssid_str) - 1] = '\0';
+    }
+
     if (connected && ip_str && ip_str[0] != '\0')
     {
         strncpy(g_wifi_ip, ip_str, sizeof(g_wifi_ip) - 1);
@@ -2517,6 +3820,83 @@ void ui_set_wifi_status(bool connected, const char *ip_str)
     {
         g_wifi_ip[0] = '\0';
     }
+
+    update_wifi_card_visuals();
+}
+
+void ui_set_wifi_scan_status(const char *status_text)
+{
+    if (!g_net_scan_status_lbl || !status_text) return;
+    lv_label_set_text(g_net_scan_status_lbl, status_text);
+
+    uint32_t col = HEX_TEXT_DIM;
+    if (strncmp(status_text, "Falha", 5) == 0)
+    {
+        col = HEX_WARN;
+    }
+    else if (strncmp(status_text, "Conectado", 9) == 0 ||
+             strncmp(status_text, "Rede anterior", 13) == 0)
+    {
+        col = 0x34D399;
+    }
+    else if (strncmp(status_text, "Conectando", 10) == 0 ||
+             strncmp(status_text, "Escaneando", 10) == 0)
+    {
+        col = HEX_CYAN;
+    }
+    lv_obj_set_style_text_color(g_net_scan_status_lbl, lv_color_hex(col), 0);
+}
+
+void ui_set_wifi_scan_results(const UiWifiNetwork *networks, int count)
+{
+    if (!g_net_wifi_list) return;
+
+    lv_obj_clean(g_net_wifi_list);
+    g_wifi_scan_count = 0;
+
+    if (!networks || count <= 0)
+    {
+        ui_set_wifi_scan_status("Nenhuma rede encontrada");
+        return;
+    }
+
+    const int n = (count > MAX_WIFI_SCAN_RESULTS) ? MAX_WIFI_SCAN_RESULTS : count;
+    for (int i = 0; i < n; ++i)
+    {
+        g_wifi_scan_cache[i] = networks[i];
+        g_wifi_scan_count++;
+
+        char line[72];
+        snprintf(
+            line,
+            sizeof(line),
+            "%s  (%ld dBm)%s",
+            networks[i].ssid,
+            static_cast<long>(networks[i].rssi),
+            networks[i].secured ? "  *" : "");
+
+        lv_obj_t *item = lv_list_add_btn(g_net_wifi_list, LV_SYMBOL_WIFI, line);
+        lv_obj_set_height(item, 38);
+        lv_obj_set_style_bg_opa(item, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(item, lv_color_hex(HEX_CARD), 0);
+        lv_obj_set_style_bg_color(item, lv_color_hex(0x0A2A43), LV_STATE_PRESSED);
+        lv_obj_set_style_text_color(item, lv_color_hex(HEX_TEXT_MAIN), 0);
+        lv_obj_set_style_text_font(item, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_radius(item, 9, 0);
+        lv_obj_set_style_border_width(item, 1, 0);
+        lv_obj_set_style_border_color(item, lv_color_hex(HEX_CARD_BORDER), 0);
+        lv_obj_set_style_pad_ver(item, 6, 0);
+        lv_obj_set_style_pad_hor(item, 10, 0);
+        lv_obj_add_event_cb(
+            item,
+            wifi_list_item_cb,
+            LV_EVENT_CLICKED,
+            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+    }
+
+    char sbuf[40];
+    snprintf(sbuf, sizeof(sbuf), "%d redes (toque p/ conectar)", g_wifi_scan_count);
+    ui_set_wifi_scan_status(sbuf);
 }
 
 void ui_set_clock_text(const char *hhmm)
@@ -2534,4 +3914,103 @@ void ui_set_clock_text(const char *hhmm)
             lv_label_set_text(g_header_clock[i], g_last_clock);
         }
     }
+    if (g_ss_clock_lbl)
+    {
+        lv_label_set_text(g_ss_clock_lbl, g_last_clock);
+    }
+}
+
+void ui_set_date_text(const char *date_str)
+{
+    if (!date_str || !date_str[0]) return;
+    if (strcmp(g_last_date, date_str) == 0) return;
+
+    strncpy(g_last_date, date_str, sizeof(g_last_date) - 1);
+    g_last_date[sizeof(g_last_date) - 1] = '\0';
+
+    if (g_ss_date_lbl)
+    {
+        lv_label_set_text(g_ss_date_lbl, g_last_date);
+    }
+}
+
+void ui_sync_weather(int temp_c, const char *city)
+{
+    g_weather_temp = temp_c;
+    g_has_weather = true;
+    if (city && city[0] != '\0')
+    {
+        strncpy(g_weather_city, city, sizeof(g_weather_city) - 1);
+        g_weather_city[sizeof(g_weather_city) - 1] = '\0';
+    }
+    update_screensaver_weather_visuals();
+}
+
+void ui_set_system_metrics(uint32_t free_heap_kb, uint32_t free_psram_kb, uint32_t free_flash_kb, const char *host_ip)
+{
+    if (host_ip)
+    {
+        strncpy(g_ws_host_ip, host_ip, sizeof(g_ws_host_ip) - 1);
+        g_ws_host_ip[sizeof(g_ws_host_ip) - 1] = '\0';
+    }
+
+    if (g_sys_mem_lbl)
+    {
+        char mbuf[72];
+        const unsigned psram_mb_int = free_psram_kb / 1024U;
+        const unsigned psram_mb_dec = ((free_psram_kb % 1024U) * 10U) / 1024U;
+        const unsigned flash_mb_int = free_flash_kb / 1024U;
+        const unsigned flash_mb_dec = ((free_flash_kb % 1024U) * 10U) / 1024U;
+        snprintf(
+            mbuf,
+            sizeof(mbuf),
+            "Heap %lu KB  •  PSRAM %u.%u MB  •  Flash %u.%u MB",
+            static_cast<unsigned long>(free_heap_kb),
+            psram_mb_int,
+            psram_mb_dec,
+            flash_mb_int,
+            flash_mb_dec);
+        lv_label_set_text(g_sys_mem_lbl, mbuf);
+    }
+
+    update_system_info_visuals();
+}
+
+bool ui_is_screensaver_active()
+{
+    return (g_active_screen == UI_SCREEN_SCREENSAVER);
+}
+
+UiScreenId ui_get_active_screen()
+{
+    return g_active_screen;
+}
+
+bool ui_is_wifi_modal_open()
+{
+    return (g_wifi_modal != nullptr) && !lv_obj_has_flag(g_wifi_modal, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_enter_screensaver()
+{
+    if (g_active_screen == UI_SCREEN_SCREENSAVER) return;
+    if (g_active_screen == UI_SCREEN_GAME_HUD) return;
+    if (ui_is_wifi_modal_open()) return;
+
+    g_prev_screen_before_ss = g_active_screen;
+    set_screensaver_dim(true);
+    ui_show_screen(UI_SCREEN_SCREENSAVER, true);
+}
+
+void ui_wake_screensaver()
+{
+    if (g_active_screen != UI_SCREEN_SCREENSAVER) return;
+
+    set_screensaver_dim(false);
+    UiScreenId restore = g_prev_screen_before_ss;
+    if (restore == UI_SCREEN_SCREENSAVER || restore >= NUM_SCREENS)
+    {
+        restore = UI_SCREEN_HOME;
+    }
+    ui_show_screen(restore, true);
 }

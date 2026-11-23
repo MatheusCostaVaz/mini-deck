@@ -25,6 +25,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from dataclasses import dataclass
 from typing import Optional
@@ -36,6 +38,13 @@ from websockets.exceptions import WebSocketException
 
 from audio_controller import AudioAppSession, AudioController
 from media_controller import MediaController, MediaSnapshot
+
+try:
+    from winrt.windows.devices.radios import Radio, RadioKind, RadioState
+
+    HAS_WINRT_RADIOS = True
+except ImportError:
+    HAS_WINRT_RADIOS = False
 
 BROWSER_CANDIDATES = (
     "msedge.exe",
@@ -119,6 +128,13 @@ STATS_POLL_TICKS = 6  # 6 * 0.25s = 1.5s
 APP_PING_INTERVAL_S = 2.0
 RECONNECT_DELAY_S = 2.0
 RECENT_ESP_WRITE_GRACE_S = 0.35
+WEATHER_CITY = "São Luís"
+WEATHER_API_URL = (
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude=-2.5307&longitude=-44.3068&current=temperature_2m&timezone=America%2FFortaleza"
+)
+WEATHER_REFRESH_S = 1800.0  # 30 minutos
+PC_IDLE_TIMEOUT_S = 300.0   # 5 minutos sem input de mouse/teclado
 
 if getattr(sys, "frozen", False):
     BACKEND_DIR = Path(sys.executable).resolve().parent
@@ -674,6 +690,130 @@ class CpuTempMonitor:
         self._wmi_service = None
 
 
+class BluetoothController:
+    """Controle nativo do rádio Bluetooth do Windows via WinRT Windows.Devices.Radios."""
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._log = logger
+        self._access_requested = False
+        self.available = HAS_WINRT_RADIOS
+
+    async def _get_bt_radio(self):
+        if not HAS_WINRT_RADIOS:
+            return None
+        try:
+            if not self._access_requested:
+                await Radio.request_access_async()
+                self._access_requested = True
+            radios = await Radio.get_radios_async()
+            for radio in radios:
+                if radio.kind == RadioKind.BLUETOOTH:
+                    return radio
+        except Exception as exc:
+            self._log.debug("[Bluetooth] Falha ao consultar rádio WinRT: %s", exc)
+        return None
+
+    async def get_state(self) -> Optional[str]:
+        radio = await self._get_bt_radio()
+        if radio is None:
+            return None
+        try:
+            if radio.state == RadioState.ON:
+                return "on"
+            return "off"
+        except Exception:
+            return None
+
+    async def toggle(self) -> Optional[str]:
+        radio = await self._get_bt_radio()
+        if radio is None:
+            return None
+        try:
+            target = RadioState.OFF if radio.state == RadioState.ON else RadioState.ON
+            await radio.set_state_async(target)
+            return "on" if target == RadioState.ON else "off"
+        except Exception as exc:
+            self._log.warning("[Bluetooth] Falha ao alternar rádio Bluetooth: %s", exc)
+            return await self.get_state()
+
+
+class _LastInputInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+class IdleMonitor:
+    """Monitora tempo real de inatividade de teclado/mouse via GetLastInputInfo."""
+
+    def __init__(self) -> None:
+        self._user32 = ctypes.windll.user32 if os.name == "nt" else None
+        self._kernel32 = ctypes.windll.kernel32 if os.name == "nt" else None
+
+    def get_idle_seconds(self) -> float:
+        if self._user32 is None or self._kernel32 is None:
+            return 0.0
+        try:
+            lii = _LastInputInfo()
+            lii.cbSize = ctypes.sizeof(_LastInputInfo)
+            if not self._user32.GetLastInputInfo(ctypes.byref(lii)):
+                return 0.0
+            now_tick = self._kernel32.GetTickCount() & 0xFFFFFFFF
+            elapsed_ms = (now_tick - (lii.dwTime & 0xFFFFFFFF)) & 0xFFFFFFFF
+            return elapsed_ms / 1000.0
+        except OSError:
+            return 0.0
+
+
+class WeatherMonitor:
+    """Consulta periódica (a cada 30 min) da temperatura atual em São Luís via Open-Meteo."""
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._log = logger
+        self.city: str = WEATHER_CITY
+        self.temp: Optional[int] = None
+        self._last_fetch_ts: float = 0.0
+        self._fetching: bool = False
+
+    def _fetch_sync(self) -> Optional[int]:
+        req = urllib.request.Request(
+            WEATHER_API_URL,
+            headers={"User-Agent": "MiniDeckIoT/2.2"},
+        )
+        with urllib.request.urlopen(req, timeout=6.0) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        current = data.get("current") or data.get("current_weather")
+        if isinstance(current, dict):
+            val = current.get("temperature_2m")
+            if val is None:
+                val = current.get("temperature")
+            if val is not None:
+                return int(round(float(val)))
+        return None
+
+    async def refresh_if_due(self, force: bool = False) -> bool:
+        now = time.monotonic()
+        if self._fetching:
+            return False
+        if not force and self._last_fetch_ts > 0.0 and (now - self._last_fetch_ts) < WEATHER_REFRESH_S:
+            return False
+        self._fetching = True
+        try:
+            temp_c = await asyncio.to_thread(self._fetch_sync)
+            self._last_fetch_ts = time.monotonic()
+            if temp_c is not None:
+                changed = (temp_c != self.temp)
+                self.temp = temp_c
+                self._log.info("[Clima] %s: %d°C (Open-Meteo)", self.city, self.temp)
+                return changed
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+            # Em caso de erro temporário de rede, tenta novamente em ~2 minutos
+            self._last_fetch_ts = time.monotonic() - (WEATHER_REFRESH_S - 120.0)
+            self._log.debug("[Clima] Falha ao consultar Open-Meteo: %s", exc)
+        finally:
+            self._fetching = False
+        return False
+
+
 class _UdpDiscoveryProtocol(asyncio.DatagramProtocol):
     def __init__(self, future: asyncio.Future, logger: logging.Logger) -> None:
         self._future = future
@@ -735,10 +875,16 @@ class MiniDeckWiFiBridge:
         self._c4_deadline: Optional[float] = None
         self._c4_task: Optional[asyncio.Task] = None
 
-        # Inicializa o contador não-bloqueante de CPU do psutil e leitores térmicos/GPU
+        # Inicializa o contador não-bloqueante de CPU do psutil e leitores térmicos/GPU/Bluetooth/Clima/Idle
         psutil.cpu_percent(interval=None)
         self._gpu = GpuMonitor(self.log)
         self._cpu_temp = CpuTempMonitor(self.log)
+        self._bt = BluetoothController(self.log)
+        self._last_bt_state: Optional[str] = None
+        self._weather = WeatherMonitor(self.log)
+        self._last_weather_sent: Optional[int] = None
+        self._idle = IdleMonitor()
+        self._last_pc_idle: bool = False
 
     # ------------------------------------------------------------------
     # Auto-Discovery UDP (porta 4210)
@@ -1209,6 +1355,53 @@ class MiniDeckWiFiBridge:
         except (WebSocketException, OSError):
             pass
 
+    async def _sync_pc_bluetooth_to_esp32(self, ws, force: bool = False) -> None:
+        state = await self._bt.get_state()
+        if state is None:
+            return
+        if force or state != self._last_bt_state:
+            self._last_bt_state = state
+            try:
+                await self._send_json(ws, {"sync": "pc_bluetooth", "state": state})
+            except (WebSocketException, OSError):
+                pass
+
+    async def _sync_weather_to_esp32(self, ws, force: bool = False) -> None:
+        changed = await self._weather.refresh_if_due(force=False)
+        if self._weather.temp is None:
+            return
+        if force or changed or self._weather.temp != self._last_weather_sent:
+            self._last_weather_sent = self._weather.temp
+            try:
+                await self._send_json(
+                    ws,
+                    {
+                        "sync": "weather",
+                        "temp": self._weather.temp,
+                        "city": self._weather.city,
+                    },
+                )
+            except (WebSocketException, OSError):
+                pass
+
+    async def _sync_pc_idle_to_esp32(self, ws, force: bool = False) -> None:
+        idle_s = self._idle.get_idle_seconds()
+        game_running = self._find_running_process(KNOWN_GAME_CANDIDATES) is not None
+        is_idle = (idle_s >= PC_IDLE_TIMEOUT_S) and (not game_running)
+        if force or is_idle != self._last_pc_idle:
+            self._last_pc_idle = is_idle
+            try:
+                await self._send_json(ws, {"sync": "pc_idle", "state": is_idle})
+            except (WebSocketException, OSError):
+                return
+            if not force or is_idle:
+                self.log.info(
+                    "[Windows -> WiFi] PC Idle = %s (%.0fs sem input%s)",
+                    "INATIVO (Standby)" if is_idle else "ATIVO",
+                    idle_s,
+                    ", jogo ativo" if game_running else "",
+                )
+
     @staticmethod
     def _enable_tcp_nodelay(transport) -> bool:
         if transport is None:
@@ -1481,6 +1674,19 @@ class MiniDeckWiFiBridge:
             await self._sync_stats_to_esp32(ws, log_once=False)
             return
 
+        if cmd == "toggle_pc_bluetooth":
+            new_state = await self._bt.toggle()
+            if new_state is not None:
+                self._last_bt_state = new_state
+                await self._send_json(ws, {"sync": "pc_bluetooth", "state": new_state})
+                self.log.info(
+                    "[ESP32 WiFi -> Windows] Bluetooth do PC -> %s",
+                    "LIGADO" if new_state == "on" else "DESLIGADO",
+                )
+            else:
+                self.log.warning("[ESP32 WiFi -> Windows] Rádio Bluetooth do PC indisponível.")
+            return
+
         if event == "screen":
             screen = str(msg.get("screen", "")).lower()
             if screen == "media":
@@ -1495,6 +1701,9 @@ class MiniDeckWiFiBridge:
                 await self._sync_game_channel(ws, audio)
                 await self._sync_stats_to_esp32(ws, log_once=False)
                 await self._sync_cs2_c4_to_esp32(ws)
+            elif screen in ("network", "settings"):
+                self.log.info("[ESP32 WiFi] Tela Configurações aberta -> sincronizando estado do Bluetooth do PC...")
+                await self._sync_pc_bluetooth_to_esp32(ws, force=True)
             elif screen == "macros":
                 self.log.info("[ESP32 WiFi] Tela Atalhos aberta.")
             return
@@ -1508,6 +1717,9 @@ class MiniDeckWiFiBridge:
             await self._sync_media_to_esp32(ws, audio=None, force=True)
             await self._sync_stats_to_esp32(ws, log_once=False)
             await self._sync_cs2_c4_to_esp32(ws)
+            await self._sync_pc_bluetooth_to_esp32(ws, force=True)
+            await self._sync_weather_to_esp32(ws, force=True)
+            await self._sync_pc_idle_to_esp32(ws, force=True)
             return
 
         if event == "set_vol" and target:
@@ -1716,6 +1928,9 @@ class MiniDeckWiFiBridge:
         await self._sync_media_to_esp32(ws, audio=audio, force=True)
         await self._sync_stats_to_esp32(ws, log_once=True)
         await self._sync_cs2_c4_to_esp32(ws)
+        await self._sync_pc_bluetooth_to_esp32(ws, force=True)
+        await self._sync_weather_to_esp32(ws, force=True)
+        await self._sync_pc_idle_to_esp32(ws, force=True)
 
         for target, snap in self._last_channels.items():
             proc_info = snap.process_name or "aguardando app"
@@ -1732,6 +1947,14 @@ class MiniDeckWiFiBridge:
             "  Microfone      -> %s",
             "MUTADO" if self._last_mic_mute else "ATIVO",
         )
+        bt_txt = (
+            "LIGADO"
+            if self._last_bt_state == "on"
+            else ("DESLIGADO" if self._last_bt_state == "off" else "N/A")
+        )
+        self.log.info("  Bluetooth PC   -> %s", bt_txt)
+        if self._weather.temp is not None:
+            self.log.info("  Clima          -> %s: %d°C", self._weather.city, self._weather.temp)
         self.log.info("Bridge Wi-Fi ativa! Controle 100% sem fio pronto.")
 
         async def rx_task() -> None:
@@ -1763,8 +1986,12 @@ class MiniDeckWiFiBridge:
                 await self._sync_to_esp32(ws, audio, force_all=False)
                 if tick_count % 2 == 0:
                     await self._sync_media_to_esp32(ws, audio=audio, force=False)
+                if tick_count % 4 == 0:
+                    await self._sync_pc_idle_to_esp32(ws, force=False)
                 if tick_count % STATS_POLL_TICKS == 0:
                     await self._sync_stats_to_esp32(ws, log_once=False)
+                    await self._sync_pc_bluetooth_to_esp32(ws, force=False)
+                    await self._sync_weather_to_esp32(ws, force=False)
                 now = time.monotonic()
                 if (now - last_ping) >= APP_PING_INTERVAL_S:
                     last_ping = now
@@ -1784,6 +2011,15 @@ class MiniDeckWiFiBridge:
                 exc = task.exception()
                 if exc is not None:
                     raise exc
+        except asyncio.CancelledError:
+            try:
+                await asyncio.wait_for(
+                    self._send_json(ws, {"sync": "pc_idle", "state": True}),
+                    timeout=0.5,
+                )
+            except Exception:
+                pass
+            raise
         finally:
             self._active_ws = None
             if not t_rx.done():

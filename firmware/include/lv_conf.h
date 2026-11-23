@@ -23,10 +23,10 @@
 /*=========================
    MEMORY SETTINGS
  *=========================*/
-/* Heap interno rápido (96 KB em SRAM) para múltiplas telas LVGL; draw buffer fica em PSRAM */
+/* Heap interno rápido (144 KB em SRAM) para 12 telas LVGL + teclado/lista/screensaver; draw buffer fica em PSRAM */
 #define LV_MEM_CUSTOM 0
 #if LV_MEM_CUSTOM == 0
-    #define LV_MEM_SIZE (96U * 1024U)
+    #define LV_MEM_SIZE (144U * 1024U)
     #define LV_MEM_ADR 0
 #endif
 
@@ -131,7 +131,7 @@
 #define LV_FONT_MONTSERRAT_42 0
 #define LV_FONT_MONTSERRAT_44 0
 #define LV_FONT_MONTSERRAT_46 0
-#define LV_FONT_MONTSERRAT_48 0
+#define LV_FONT_MONTSERRAT_48 1
 
 #define LV_FONT_MONTSERRAT_12_SUBPX 0
 #define LV_FONT_MONTSERRAT_28_COMPRESSED 0
@@ -164,7 +164,7 @@
 #define LV_USE_ARC        1
 #define LV_USE_BAR        1
 #define LV_USE_BTN        1
-#define LV_USE_BTNMATRIX  0
+#define LV_USE_BTNMATRIX  1
 #define LV_USE_CANVAS     0
 #define LV_USE_CHECKBOX   0
 #define LV_USE_DROPDOWN   0
@@ -178,7 +178,7 @@
 #define LV_USE_ROLLER     0
 #define LV_USE_SLIDER     1
 #define LV_USE_SWITCH     0
-#define LV_USE_TEXTAREA   0
+#define LV_USE_TEXTAREA   1
 #define LV_USE_TABLE      0
 
 /*==================
@@ -189,9 +189,9 @@
 #define LV_USE_CHART      0
 #define LV_USE_COLORWHEEL 0
 #define LV_USE_IMGBTN     0
-#define LV_USE_KEYBOARD   0
+#define LV_USE_KEYBOARD   1
 #define LV_USE_LED        0
-#define LV_USE_LIST       0
+#define LV_USE_LIST       1
 #define LV_USE_MENU       0
 #define LV_USE_METER      0
 #define LV_USE_MSGBOX     0
