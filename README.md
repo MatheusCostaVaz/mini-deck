@@ -4,18 +4,22 @@ Dispositivo físico autônomo com **display touch IPS de 3.5" (480×320)** basea
 
 ---
 
-## 🚀 Instalação Oficial no Windows (Instalador Único)
+## 🚀 Download & Instalação Rápida (Windows)
 
-### ✅ Método Oficial: `MiniDeckSetup.exe` (Recomendado)
-A forma oficial e mais simples de instalar a bridge em qualquer PC com Windows 10/11 (64-bit) — **sem precisar instalar Python**:
+Não é necessário instalar Python, clonar o projeto ou usar o terminal.
 
-1. Execute o instalador único **`dist/MiniDeckSetup.exe`** (gerado via Inno Setup a partir de [`backend/installer.iss`](backend/installer.iss) e [`build_installer.bat`](build_installer.bat)).
-2. O instalador configura tudo automaticamente em `%LOCALAPPDATA%\MiniDeck`:
+[![Baixar MiniDeckSetup.exe](https://img.shields.io/badge/Download-MiniDeckSetup.exe_(v2.3)-2563EB?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/MatheusCostaVaz/mini-deck/releases/download/v2.3/MiniDeckSetup.exe)
+
+> 💡 **Link direto alternativo:** [Clique aqui para baixar o MiniDeckSetup.exe](https://github.com/MatheusCostaVaz/mini-deck/releases/download/v2.3/MiniDeckSetup.exe) (~12,5 MB)
+
+### Como Usar:
+1. Baixe o **`MiniDeckSetup.exe`** no link acima.
+2. Dê **dois cliques** para instalar em `%LOCALAPPDATA%\MiniDeck`:
    - **Sem UAC / sem permissão de Administrador** (`PrivilegesRequired=lowest`).
-   - **Ambiente Python portátil embutido e oficialmente assinado** (Python Software Foundation) — **100% silencioso** (zero telas pretas no console) e **imune a falsos-positivos do Windows Smart App Control / Defender**.
+   - **Runtime Python portátil embutido e oficialmente assinado** (*Python Software Foundation*) — **100% silencioso** (zero telas pretas no console) e **imune a falsos-positivos do Windows Smart App Control / Defender**.
    - **Inicialização automática com o Windows** via `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\MiniDeckBridge.lnk` apontando para [`backend/iniciar_silencioso.vbs`](backend/iniciar_silencioso.vbs).
    - **Atalhos no Menu Iniciar (e opcionais na Área de Trabalho):** Iniciar Bridge, Parar Bridge ([`backend/parar_bridge.vbs`](backend/parar_bridge.vbs)), Editar Jogos/Atalhos (`config.json`) e Desinstalar com limpeza automática.
-   - Ao final do assistente, basta deixar marcada a opção **`[X] Iniciar o Mini Deck Bridge agora`** e clicar em **Concluir**.
+3. Conclua a instalação mantendo marcada a opção **`[X] Iniciar o Mini Deck Bridge agora`**: a bridge inicia automaticamente em segundo plano e já se conecta ao Mini Deck.
 
 ### 📦 Como Gerar o Instalador a partir do Código-Fonte
 Basta executar [`build_installer.bat`](build_installer.bat) na raiz do projeto:
