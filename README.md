@@ -23,11 +23,6 @@ Basta executar [`build_installer.bat`](build_installer.bat) na raiz do projeto:
 2. Monta e valida o runtime Python portátil assinado via [`backend/prepare_portable_runtime.ps1`](backend/prepare_portable_runtime.ps1).
 3. Compila [`backend/installer.iss`](backend/installer.iss) e valida o executável final em **`dist/MiniDeckSetup.exe`**.
 
-### ⚡ Alternativa para Desenvolvimento Local (Sem Empacotamento)
-Se estiver rodando diretamente do repositório clonado com `backend\.venv`:
-- **Instalar Autostart:** dê dois cliques em [`INSTALAR_AUTOSTART.bat`](INSTALAR_AUTOSTART.bat).
-- **Remover Autostart:** dê dois cliques em [`DESINSTALAR_AUTOSTART.bat`](DESINSTALAR_AUTOSTART.bat).
-
 ---
 
 ## ✨ Funcionalidades da Versão 2.3

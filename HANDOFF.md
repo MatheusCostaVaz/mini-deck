@@ -77,7 +77,6 @@ Todas as telas interativas compartilham o **Header Universal de 58 px** (`[ HORA
 - **`backend/parar_bridge.vbs`:** Encerra silenciosamente via WMI apenas processos `python.exe`/`pythonw.exe` cujo `CommandLine` contenha `wifi_bridge.py`.
 - **`backend/prepare_portable_runtime.ps1`:** Monta `backend/runtime_portable/` (ignorado pelo Git) baixando o pacote oficial assinado `python-3.14.6-embed-amd64.zip`, configurando `python314._pth`, copiando dependências de execução limpas, validando assinatura digital e executando smoke-test real de imports.
 - **`backend/installer.iss` + `build_installer.bat`:** Esteira oficial de compilação **Inno Setup 6** que gera **`dist/MiniDeckSetup.exe`** (`PrivilegesRequired=lowest`, `{localappdata}\MiniDeck`, `{userstartup}\MiniDeckBridge.lnk`, Menu Iniciar, atalhos opcionais na Área de Trabalho e limpeza no desinstalador).
-- **`INSTALAR_AUTOSTART.bat` / `DESINSTALAR_AUTOSTART.bat`:** Atalhos rápidos de autostart silencioso para quem executa direto do repositório local.
 
 #### Protocolo JSON Bidirecional (WebSocket porta `81`)
 - **ESP32 → Windows:**
