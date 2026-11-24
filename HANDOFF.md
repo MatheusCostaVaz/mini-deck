@@ -1,106 +1,119 @@
-# Mini Deck IoT — Handoff Técnico (v2.0)
+# Mini Deck IoT — Handoff Técnico (v2.3)
 
 > **Última atualização:** 2026-11-23  
 > **Repositório:** https://github.com/MatheusCostaVaz/mini-deck.git  
 > **Branch ativa de desenvolvimento:** `v2-dev`  
-> **Branch de produção:** `main` (v2.0 oficial mesclada via `--no-ff` no commit `38229d6`)
+> **Branch de produção:** `main` (v2.3 oficial mesclada via `--no-ff` no commit `69ea230`, tag anotada `v2.3`)
 
 ---
 
 ## 1. Visão Geral do Estado Atual
 
-O **Mini Deck IoT v2.0** é um controlador físico autônomo com tela touch de 3,5" (ESP32-S3) operando **100% sem fio via Wi-Fi + WebSockets + Auto-Discovery UDP**, conectado ao Windows 11 por uma bridge silenciosa empacotada em executável único (`backend/dist/MiniDeckBridge.exe`, ~10,8 MB, fora do Git conforme `.gitignore`).
+O **Mini Deck IoT v2.3** é um controlador físico autônomo com tela touch IPS de 3,5" (ESP32-S3) operando **100% sem fio via Wi-Fi + WebSockets + Auto-Discovery UDP**, distribuído no Windows 10/11 por meio do **instalador único oficial `dist/MiniDeckSetup.exe` (~12,5 MB)** gerado pelo **Inno Setup 6** com runtime Python 3.14.6 portátil oficialmente assinado pela *Python Software Foundation* (sem exigir Python pré-instalado, sem elevação UAC, sem janelas pretas de console e 100% imune a bloqueios do Windows Smart App Control).
 
 ### Módulos entregues e validados em hardware real
-- **Dashboard Hub (`screen_home`):** 6 cards minimalistas (ícones Phosphor 42 px) + barra lateral de Volume Master (`GERAL`).
-- **Mixer de Áudio (`screen_audio`):** 4 canais independentes (`MASTER`, `EDGE`/navegador, `DISCORD`/chat, `JOGO`) com mute individual e sincronização bidirecional WASAPI.
+- **Dashboard Hub (`screen_home`):** Cards modulares com ícones Phosphor + barra lateral de Volume Master (`GERAL`).
+- **Mixer de Áudio (`screen_audio`):** 4 canais independentes (`MASTER`, `EDGE`/navegador, `DISCORD`/chat, `JOGO`) com mute individual, sincronização bidirecional WASAPI e recuperação automática **Hot-Plug** para headsets Bluetooth/USB.
 - **Player de Mídia (`screen_media`):** Now Playing nativo do Windows 11 (WinRT SMTC), controles `prev` / `play_pause` / `next` e slider lateral dedicado ao navegador (`browser`).
-- **Monitor de Hardware (`screen_hardware`):** Telemetria em tempo real (1,5 s) de **CPU (% + °C)**, **GPU NVIDIA (% + °C)**, **RAM (% + GB usados/total)** e **Disco C:** com alertas visuais dinâmicos de carga e temperatura (`> 80 °C`).
-- **Atalhos / Macros (`screen_macros`):** Grade 2×3 com `EDGE`, `STEAM`, `DISCORD`, `DISNEY+`, `MAX` e entrada para o **Hub de Jogos (`JOGOS`)**.
-- **Hub de Jogos (`screen_games`) + Game HUD (`screen_game_hud`):**
-  - Seletor 2×2 (`CS2`, `PUBG`, `WATCH DOGS`, `OUTROS`) com verificação via `psutil` para **não reabrir** jogos já em execução.
-  - Painel Game HUD unificado: 3 tiles superiores de hardware (CPU/GPU/RAM), slider lateral esquerdo exclusivo para o **Volume do Jogo ativo (`target: "game"`)** e bloco inferior dinâmico (**CS2 C4 Timer 40 s Ultra-Low Latency** no modo CS2, ou resumo de sessão/RAM/Disco nos demais jogos).
+- **Monitor de Hardware Contínuo (`screen_hardware`):** Telemetria em tempo real (1,5 s) de **CPU (% + °C)**, **GPU NVIDIA (% + °C)**, **RAM (% + GB usados/total)** e **Disco C:** com alertas visuais (`> 80 °C`) e **bloqueio Anti-Standby**.
+- **Atalhos Dinâmicos (`screen_macros`):** Grade alimentada dinamicamente por `backend/config.json` com **hot-reload automático** (apps locais, protocolos `steam://`/`discord://` e URLs) + entrada para o Hub de Jogos.
+- **Hub de Jogos Dinâmico (`screen_games`) + Game HUD (`screen_game_hud`):**
+  - **Steam Auto-Scan:** lê `HKCU\Software\Valve\Steam`, percorre todas as bibliotecas em `libraryfolders.vdf` e importa todos os jogos via `appmanifest_*.acf` (filtrando ferramentas internas como Steamworks/Proton/Redistributables), mesclando sem duplicatas com jogos manuais de `config.json` (ex.: `WARDOGS`).
+  - Proteção via `psutil` contra reabertura de jogos já em execução.
+  - Painel Game HUD unificado com 3 tiles de hardware (CPU/GPU/RAM), slider lateral exclusivo do **Volume do Jogo (`target: "game"`)**, botão discreto **`<`** no cabeçalho para retornar direto a `screen_games`, **CS2 C4 Timer 40 s Ultra-Low Latency** e **bloqueio Anti-Standby**.
+- **Central de Configurações Modular (`screen_settings`):**
+  - **Wi-Fi (`screen_wifi_manager`):** Sistema **Multi-Wi-Fi** com até 4 redes salvas na NVS (`Preferences.h`), auto-seleção no boot pelo melhor RSSI, scanner assíncrono, teclado virtual LVGL completo (`480×240`) e fallback seguro de 12 s.
+  - **Bluetooth do PC:** toggle bidirecional do rádio Bluetooth via WinRT (`Windows.Devices.Radios`).
+  - **Tela & Brilho (`screen_brightness`):** controle por hardware **PWM LEDC** (`GFX_BL` = GPIO 1), slider `10%–100%` + presets (`25%`, `60%`, `100%`) persistidos na NVS.
+  - **Sistema / Info (`screen_system_info`):** versão do firmware, Heap RAM / PSRAM / Flash livres ao vivo, IP do PC conectado, seletor de **Standby / Auto-Sleep** (`Desativado`, `2 min`, `5 min`, `10 min`), calibração touch e `ESP.restart()`.
+- **Descanso de Tela Inteligente (`screen_screensaver`):**
+  - Relógio digital grande (`48 px`), data PT-BR via NTP (`GMT-3`) e **clima de São Luís** via Open-Meteo API (atualização a cada 30 min) com dimerização suave automática.
+  - Disparado por inatividade real no Windows (`GetLastInputInfo` > 5 min sem jogo ativo), queda do WebSocket (> 20 s) ou temporizador local de standby — sempre respeitando o **Anti-Standby** quando em `screen_hardware`, `screen_games` ou `screen_game_hud`.
 
 ---
 
-## 2. Arquitetura Atual da v2.0
+## 2. Arquitetura Atual da v2.3
 
 ### 2.1 Hardware e Firmware (`firmware/`)
 
 | Componente | Especificação / Configuração |
 |---|---|
 | **Placa** | Guition **JC3248W535C** (`esp32-s3-devkitc-1`, ESP32-S3-N16R8, 16 MB QIO Flash, 8 MB OPI PSRAM, porta `COM8`) |
-| **Display** | AXS15231B 3,5" 320×480 QSPI → `Arduino_GFX @ 1.5.5` + `Arduino_Canvas` em PSRAM (paisagem `480×320`, `rotation = 1`) |
-| **Touch** | AXS15231B capacitivo I2C (`SDA=4, SCL=8, ADDR=0x3B`) |
-| **UI Engine** | `lvgl @ ~8.3.11` (`LV_MEM_SIZE = 96 KB` em SRAM; framebuffer em PSRAM) |
-| **Rede** | `WiFi.begin(...)` assíncrono + `WiFi.setSleep(false)`, NTP GMT-3 (`a.st1.ntp.br`), `WebSocketsServer(81)`, UDP Broadcast na porta `4210` a cada 2 s (`{"device":"minideck","port":81}`) |
+| **Display & Backlight** | AXS15231B 3,5" 320×480 QSPI → `Arduino_GFX @ 1.5.5` + `Arduino_Canvas` em PSRAM (paisagem `480×320`, `rotation = 1`); Backlight PWM LEDC em `GFX_BL = GPIO 1` |
+| **Touch** | AXS15231B capacitivo I²C (`SDA=4, SCL=8, INT=3, ADDR=0x3B`) |
+| **UI Engine** | `lvgl @ ~8.3.11` (`LV_MEM_SIZE = 96 KB` em SRAM; framebuffer em PSRAM; `LV_FONT_MONTSERRAT_48` habilitada para o relógio do screensaver) |
+| **Rede & Credenciais** | `firmware/src/wifi_manager.h/.cpp` (NVS `Preferences` até 4 redes + auto-seleção por RSSI + fallback `#if __has_include("secrets.h")` ignorado no Git); `WiFi.setSleep(false)`, NTP GMT-3, `WebSocketsServer(81)`, UDP Broadcast porta `4210` |
 | **Fontes/Ícones** | `firmware/src/assets/`: `phosphor_20/28/32/42.c`, `inter_16/medium_16/bold_16.c` (Latin-1 completo, inclui acentos PT-BR e `°`) |
-| **Uso de Memória** | RAM ~`45,1%` (`147,8 KB / 327 KB`) · Flash ~`27,3%` (`1,79 MB / 6,55 MB`) |
+| **Uso de Memória (v2.3)** | RAM `60,8%` (`199.376 / 327.680 bytes`) · Flash `29,8%` (`1.950.781 / 6.553.600 bytes`) |
 
-#### Mapa das 7 Telas LVGL (`firmware/src/ui.h` e `firmware/src/ui.cpp`)
-Todas as telas compartilham o **Header Universal de 58 px** (`[ HORA NTP ] [ HOME 62×48 ] --- CENTRO DINÂMICO --- [ MIC 90×48 ]`) e, exceto o Mixer, a **Sidebar Esquerda de 70×246 px**:
+#### Mapa das 12 Telas LVGL (`firmware/src/ui.h` e `firmware/src/ui.cpp`)
+Todas as telas interativas compartilham o **Header Universal de 58 px** (`[ HORA NTP ] [ HOME ] [< opcional em Game HUD] --- CENTRO DINÂMICO --- [ MIC ]`):
 
-| `UiScreenId` | Tela | Sidebar Esquerda | Conteúdo Central |
+| `UiScreenId` | Tela | Sidebar Esquerda | Conteúdo Central / Função |
 |---|---|---|---|
-| `0` | `UI_SCREEN_HOME` | `GERAL` (`master`) | Grade 2×3 de módulos (`Mídia`, `Mixer`, `Brilho`, `Rede`, `Atalhos`, `Hardware`) |
+| `0` | `UI_SCREEN_HOME` | `GERAL` (`master`) | Grade modular de cards (`Mídia`, `Mixer`, `Hardware`, `Atalhos`, `Jogos`, `Configurações`) |
 | `1` | `UI_SCREEN_AUDIO` | *(4 colunas full-width)* | Sliders verticais `MASTER`, `EDGE`, `DISCORD`, `JOGO` + mute |
 | `2` | `UI_SCREEN_MEDIA` | `browser` (`EDGE`) | Card Now Playing (scroll circular) + botões `Prev / Play-Pause / Next` |
-| `3` | `UI_SCREEN_HARDWARE` | `master` | 3 cards horizontais (`CPU % + °C + Disco C:`, `GPU % + °C`, `RAM % + GB`) |
-| `4` | `UI_SCREEN_MACROS` | `master` | Grade 2×3 (`EDGE`, `STEAM`, `DISCORD`, `DISNEY+`, `MAX`, `JOGOS`) |
-| `5` | `UI_SCREEN_GAMES` | `master` | Grade 2×2 grande (`CS2`, `PUBG`, `WATCH DOGS`, `OUTROS`) |
-| `6` | `UI_SCREEN_GAME_HUD` | `JOGO` (`game`) | Topo: 3 tiles `CPU / GPU / RAM`; Base: **CS2 C4 Timer (40 s)** ou **Sessão/RAM/Disco** |
+| `3` | `UI_SCREEN_HARDWARE` | `master` | 3 cards horizontais (`CPU % + °C + Disco C:`, `GPU % + °C`, `RAM % + GB`) — **Anti-Standby** |
+| `4` | `UI_SCREEN_MACROS` | `master` | Grade dinâmica de atalhos (`config.json`) + acesso ao Hub de Jogos |
+| `5` | `UI_SCREEN_GAMES` | `master` | Grade 2×N rolável dinâmica (Steam Auto-Scan + `config.json`) — **Anti-Standby** |
+| `6` | `UI_SCREEN_GAME_HUD` | `JOGO` (`game`) | Botão `<` no header + 3 tiles `CPU/GPU/RAM` + **CS2 C4 Timer (40 s)** / Sessão — **Anti-Standby** |
+| `7` | `UI_SCREEN_SETTINGS` | `master` | Hub 2×2: `Wi-Fi`, `Bluetooth PC`, `Tela & Brilho`, `Sistema / Info` |
+| `8` | `UI_SCREEN_WIFI` | *(full-width)* | Scanner Wi-Fi, lista de redes salvas/encontradas e modal com teclado virtual `480×240` |
+| `9` | `UI_SCREEN_BRIGHTNESS` | *(full-width)* | Slider PWM `10%–100%` + presets `25%`, `60%`, `100%` (salvos na NVS) |
+| `10` | `UI_SCREEN_SYSTEM` | *(full-width)* | Versão, Heap/PSRAM/Flash, IP do PC, seletor de Standby (`0/2/5/10 min`), calibração e Reiniciar |
+| `11` | `UI_SCREEN_SCREENSAVER` | *(full-screen dimmed)* | Relógio `48 px`, data PT-BR e clima de São Luís (`Open-Meteo`); toque acorda com segurança |
 
 ---
 
-### 2.2 Backend Windows (`backend/`)
+### 2.2 Backend Windows & Empacotamento (`backend/` + raiz)
 
-- **`backend/wifi_bridge.py`:** Cliente WebSocket `asyncio` + Auto-Discovery UDP (`4210`) + mutex de instância única + log rotativo (`wifi_bridge.log`, 512 KB) + servidor HTTP local CS2 GSI (`127.0.0.1:3000`).
-- **`backend/audio_controller.py`:** Wrapper WASAPI (`pycaw` + `comtypes`) para Master, Microfone e sessões por aplicativo, com recuperação automática de **Hot-Plug** (`_with_device_retry` + `refresh_devices()`).
-- **`backend/media_controller.py`:** Leitura Now Playing e controle multimídia via **WinRT SMTC** (`winrt-Windows.Media.Control`) com fallback `VK_MEDIA_*` (`user32.keybd_event`) e sanitização Latin-1.
-- **`backend/gamestate_integration_minideck.cfg`:** Configuração GSI oficial do CS2 (`buffer "0.0"`, `throttle "0.0"`, `timeout "2.0"`), também instalada em:
-  `C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\gamestate_integration_minideck.cfg`
-- **`backend/MiniDeckBridge.spec`:** Spec do PyInstaller (`--onefile --noconsole`) com hidden imports explícitos (`comtypes`, `pycaw`, `websockets.legacy`, `psutil`, `winrt.*`).
+- **`backend/wifi_bridge.py`:** Cliente WebSocket `asyncio` + Auto-Discovery UDP (`4210`) + log rotativo (`wifi_bridge.log`) + servidor HTTP local CS2 GSI (`127.0.0.1:3000`) + Steam Auto-Scan + hot-reload de `config.json` + Open-Meteo (30 min) + detecção de inatividade (`GetLastInputInfo`) + controle Bluetooth WinRT.
+- **`backend/audio_controller.py`:** Wrapper WASAPI (`pycaw` + `comtypes`) com recuperação automática **Hot-Plug** (`_with_device_retry` + `refresh_devices()`).
+- **`backend/media_controller.py`:** Integração nativa WinRT SMTC (`winrt-Windows.Media.Control`) com fallback `VK_MEDIA_*` e sanitização Latin-1.
+- **`backend/config.json`:** Catálogo dinâmico de jogos manuais (`cs2`, `pubg`, `wardogs`) e atalhos (`edge`, `steam`, `discord`, `disney`, `max`) com hot-reload por `mtime`.
+- **`backend/gamestate_integration_minideck.cfg`:** Configuração CS2 GSI (`buffer "0.0"`, `throttle "0.0"`, `timeout "2.0"`).
+- **`backend/iniciar_silencioso.vbs`:** Executor silencioso (zero console, proteção contra instâncias duplicadas via WMI); usa automaticamente `{app}\python\pythonw.exe` (instalado) com fallback para `backend\.venv\Scripts\pythonw.exe` (dev local).
+- **`backend/parar_bridge.vbs`:** Encerra silenciosamente via WMI apenas processos `python.exe`/`pythonw.exe` cujo `CommandLine` contenha `wifi_bridge.py`.
+- **`backend/prepare_portable_runtime.ps1`:** Monta `backend/runtime_portable/` (ignorado pelo Git) baixando o pacote oficial assinado `python-3.14.6-embed-amd64.zip`, configurando `python314._pth`, copiando dependências de execução limpas, validando assinatura digital e executando smoke-test real de imports.
+- **`backend/installer.iss` + `build_installer.bat`:** Esteira oficial de compilação **Inno Setup 6** que gera **`dist/MiniDeckSetup.exe`** (`PrivilegesRequired=lowest`, `{localappdata}\MiniDeck`, `{userstartup}\MiniDeckBridge.lnk`, Menu Iniciar, atalhos opcionais na Área de Trabalho e limpeza no desinstalador).
+- **`INSTALAR_AUTOSTART.bat` / `DESINSTALAR_AUTOSTART.bat`:** Atalhos rápidos de autostart silencioso para quem executa direto do repositório local.
 
-#### Protocolo JSON Bidirecional (WebSocket porta `81` / Serial fallback)
+#### Protocolo JSON Bidirecional (WebSocket porta `81`)
 - **ESP32 → Windows:**
   - `{"event":"set_vol","target":"master|browser|discord|game","val":0..100}`
   - `{"event":"toggle_mute","target":"master|browser|discord|game|mic"}`
   - `{"cmd":"media","action":"play_pause|next|prev"}`
-  - `{"cmd":"macro","action":"edge|steam|discord|disney|hbo"}`
-  - `{"cmd":"launch_game","game":"cs2|pubg|watchdogs|custom"}`
-  - `{"event":"screen","screen":"home|audio|media|hardware|macros|games|game_hud"}`
-  - `{"event":"ready",...}` / `{"event":"pong"}`
+  - `{"cmd":"macro","action":"<id>"}` / `{"cmd":"launch_game","game":"<id>"}`
+  - `{"cmd":"toggle_bt"}`
+  - `{"event":"screen","screen":"home|audio|media|hardware|macros|games|game_hud|settings|wifi|brightness|system"}`
+  - `{"event":"standby","minutes":0|2|5|10,"saved":true}` / `{"event":"ready",...}` / `{"event":"pong"}`
 - **Windows → ESP32:**
   - `{"sync":"vol","target":"...","val":0..100}` / `{"sync":"mute",...}` / `{"sync":"label",...}`
   - `{"sync":"media","title":"...","artist":"...","playing":true|false}`
   - `{"sync":"stats","cpu":31,"cpu_temp":53,"gpu":14,"gpu_temp":47,"ram_pct":30,"ram_used":"9.7","ram_total":"31.9","disk_pct":66}`
   - `{"sync":"cs2_c4","state":"planted|idle","time_left":0..40}`
+  - `{"sync":"games_config","games":[...]}` / `{"sync":"macros_config","macros":[...]}`
+  - `{"sync":"pc_bt","enabled":true|false}`
+  - `{"sync":"weather","temp":28,"city":"São Luís"}`
+  - `{"sync":"pc_idle","state":true|false}`
   - `{"cmd":"ping"}`
 
 ---
 
-## 3. Últimas Decisões Técnicas e Armadilhas (Gotchas)
+## 3. Decisões Técnicas Críticas e Armadilhas (Gotchas)
 
-1. **`Arduino_GFX` fixado em `@ 1.5.5`:** Versões `1.6.x` exigem Arduino-ESP32 3.x (`esp32-hal-periman.h`) e quebram o build no core `espressif32 @ 7.0.1` do PlatformIO. Não atualizar sem migrar a plataforma inteira.
-2. **Ordem de inicialização AXS15231B:** O barramento QSPI do display (`gfx->begin()`) **deve** inicializar antes do I2C do touch (`Wire.begin(4, 8)`).
-3. **C++11 estrito no PlatformIO:** Structs com inicializadores padrão precisam de construtores explícitos para inicialização com chaves.
-4. **Símbolo de grau `°` (`U+00B0`):** As fontes nativas `lv_font_montserrat_*` do LVGL 8.3 não possuem `°`. Temperaturas usam `inter_bold_16` (Latin-1) com `"\xC2\xB0" "C"`.
-5. **Assets de imagem LVGL 9 (`disney.c`, `hbo.c`, `netflix.c`):** Apesar de compilarem com guarda `#if LVGL_VERSION_MAJOR >= 9`, seus arrays usam formato planar `RGB565A8` (LVGL 9), incompatível visualmente com `LV_IMG_CF_TRUE_COLOR_ALPHA` (LVGL 8). Por isso os cards de `screen_macros` usam ícones vetoriais **Phosphor** (`phosphor_32`).
-6. **Python 3.14 e `winrt`:** Usar sempre `backend\.venv\Scripts\python.exe` (o alias `python` do WindowsApps falha em sandbox). O pacote `winsdk` foi substituído pelas wheels nativas `winrt-Windows.Media.Control` para Python 3.14.
-7. **Telemetria térmica sem privilégios de Admin e sem subprocessos:**
-   - **GPU:** `nvml.dll` via `ctypes` (`nvmlDeviceGetUtilizationRates` + `nvmlDeviceGetTemperature`), `< 1 ms`, com fallback `nvidia-smi` assíncrono (`CREATE_NO_WINDOW`) e Windows PDH (`\GPU Engine(*)\Utilization Percentage`).
-   - **CPU Temp:** `pdh.dll` via `ctypes` (`\Thermal Zone Information(*)\Temperature`, `~2 ms`, sem precisar de Admin — diferente de `MSAcpi_ThermalZoneTemperature`), selecionando a maior zona térmica válida (`10..125 °C`).
-8. **Pipeline CS2 GSI Ultra-Low Latency:**
-   - `gamestate_integration_minideck.cfg` com `buffer "0.0"` e `throttle "0.0"`.
-   - `WiFi.setSleep(false)` no ESP32-S3 (evita 100–300 ms de DTIM sleep).
-   - `TCP_NODELAY` nos sockets do WebSocket e do servidor HTTP GSI (`127.0.0.1:3000`).
-   - Suporte a `Expect: 100-continue` e `Transfer-Encoding: chunked` (usados pelo `libcurl` do CS2 em payloads > 1 KB) e disparo imediato do frame `40s` na mesma corrotina.
-9. **Hot-Plug de Áudio WASAPI:** Trocar ou desconectar fones Bluetooth (ex.: `AZ09`) lançava `_ctypes.COMError (-2147023279)`. Resolvido com `_with_device_retry` em `audio_controller.py` e `try/except (COMError, Exception)` + `refresh_devices()` em `wifi_bridge.py`. Todas as chamadas COM devem permanecer na mesma thread do loop `asyncio`.
-10. **Prioridade do canal `"game"` e detecção de jogo ativo:**
-    - `_pick_game_session` prioriza jogos conhecidos (`cs2.exe`, `TslGame.exe`, `WatchDogs*.exe`, `WardogsClient-Win64-Shipping.exe`) sobre launchers (`steam.exe`, `epicgameslauncher.exe`).
-    - `_launch_game` verifica `psutil.process_iter(["name"])` antes de acionar `steam://` para nunca tentar reabrir um jogo já aberto ao retornar para a `screen_game_hud`.
-    - No PC atual, o botão `"WATCH DOGS"` detecta automaticamente **WARDOGS** (`steam://rungameid/1867240`) caso não haja atalho de Watch Dogs no Desktop.
-11. **PyInstaller no Windows:** Sempre encerrar `MiniDeckBridge.exe` antes de recompilar para evitar lock no `.exe`, e usar `backend\MiniDeckBridge.spec` (sem `--collect-submodules`, que trava no Python 3.14).
+1. **Smart App Control vs PyInstaller (Resolvido definitivamente na v2.3):** Executáveis não assinados gerados por PyInstaller (`MiniDeckBridge.exe`) são bloqueados pelo Windows Smart App Control. A solução definitiva adotada é empacotar o **Python Embeddable Package oficial** (assinado pela *Python Software Foundation*) junto com os scripts `.py` no **Inno Setup 6 (`MiniDeckSetup.exe`)**, executando via `wscript.exe` → `iniciar_silencioso.vbs` → `pythonw.exe`.
+2. **Isolamento de paths no Python Embeddable (`python314._pth`):** O modo embeddable ignora `PYTHONPATH` e não adiciona o diretório pai do script ao `sys.path` automaticamente. O arquivo `python314._pth` **deve** conter `..` e `Lib\site-packages` + `import site` para que `{app}\python\pythonw.exe` encontre `audio_controller.py` e `media_controller.py` em `{app}\`.
+3. **Extração headless no PowerShell:** `Expand-Archive` invoca `Write-Progress` e falha com Win32 `0x5` em consoles redirecionados/headless. `prepare_portable_runtime.ps1` usa `[System.IO.Compression.ZipFile]::ExtractToDirectory` + `$ProgressPreference = "SilentlyContinue"`.
+4. **Encoding UTF-8 BOM no Inno Setup 6:** `backend/installer.iss` deve manter **UTF-8 com BOM** para renderizar acentos PT-BR corretamente no assistente do Windows.
+5. **`Arduino_GFX` fixado em `@ 1.5.5`:** Versões `1.6.x` quebram o build no core `espressif32 @ 7.0.1` do PlatformIO. Não atualizar sem migrar a plataforma inteira.
+6. **Ordem de inicialização AXS15231B:** O barramento QSPI (`gfx->begin()`) **deve** inicializar antes do I²C do touch (`Wire.begin(4, 8)`).
+7. **Símbolo `°` e fontes LVGL 8.3:** As fontes `lv_font_montserrat_*` não contêm `°`; temperaturas usam `inter_bold_16` (`"\xC2\xB0" "C"`). O relógio do descanso de tela usa `LV_FONT_MONTSERRAT_48`.
+8. **Teclado virtual LVGL (`screen_wifi_manager`):** Deve usar `lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0)` com tamanho `480×240` (evita recorte de teclas fora da tela).
+9. **Anti-Standby centralizado:** Todos os gatilhos de descanso de tela (`pc_idle`, queda de WebSocket e timer de standby) passam por `ui_enter_screensaver()` em `firmware/src/ui.cpp`, que bloqueia a transição quando a tela ativa for `UI_SCREEN_HARDWARE`, `UI_SCREEN_GAMES` ou `UI_SCREEN_GAME_HUD` (ou enquanto o modal Wi-Fi estiver aberto).
+10. **Credenciais sanitizadas:** `firmware/include/secrets.h` está no `.gitignore`; nunca commitar SSIDs/senhas.
+11. **Telemetria sem Admin, CS2 GSI e Hot-Plug WASAPI:** `nvml.dll` + `pdh.dll` via `ctypes` (sem subprocessos), `WiFi.setSleep(false)` + `TCP_NODELAY` + `Expect: 100-continue`/`chunked` na porta `3000`, e todas as chamadas COM/WASAPI mantidas na mesma thread do loop `asyncio`.
 
 ---
 
@@ -108,14 +121,14 @@ Todas as telas compartilham o **Header Universal de 58 px** (`[ HORA NTP ] [ HOM
 
 ```powershell
 # Compilar e gravar firmware no ESP32-S3 (COM8)
-& "C:\Users\mathe\AppData\Local\Python\pythoncore-3.14-64\Scripts\pio.exe" run -d firmware -t upload
+& "C:\Users\mathe\.platformio\penv\Scripts\pio.exe" run -d firmware --target upload
 
-# Encerrar bridge atual e recompilar executável autônomo
-Stop-Process -Name MiniDeckBridge -Force -ErrorAction SilentlyContinue
-backend\.venv\Scripts\pyinstaller.exe --clean --noconfirm --distpath backend\dist --workpath backend\build backend\MiniDeckBridge.spec
+# Gerar o instalador oficial único (dist\MiniDeckSetup.exe)
+.\build_installer.bat
 
-# Iniciar executável desacoplado em segundo plano
-Start-Process -FilePath backend\dist\MiniDeckBridge.exe
+# Iniciar ou encerrar a bridge silenciosamente (desenvolvimento local)
+wscript.exe backend\iniciar_silencioso.vbs
+wscript.exe backend\parar_bridge.vbs
 
 # Testar CS2 GSI localmente (porta 3000)
 Invoke-RestMethod -Uri "http://127.0.0.1:3000" -Method Post -ContentType "application/json" -Body '{"round":{"bomb":"planted"},"bomb":{"state":"planted"}}'
@@ -123,16 +136,9 @@ Invoke-RestMethod -Uri "http://127.0.0.1:3000" -Method Post -ContentType "applic
 
 ---
 
-## 5. Próximos Passos Pendentes (Roadmap v2.1+)
+## 5. Próximos Passos Sugeridos (Roadmap v2.4+)
 
-1. **Card 3 da Home (`Brilho` / Iluminação — atualmente `"Em breve"`):**
-   - Implementar `screen_brightness` com controle de brilho da própria tela do Mini Deck (PWM no pino `GFX_BL`) e/ou brilho do monitor Windows (DDC/CI / WMI) ou automação Smart Home (Tuya/Home Assistant/MQTT).
-2. **Card 4 da Home (`Rede` — atualmente exibe apenas toast com IP):**
-   - Implementar `screen_network` exibindo SSID, IP local, força do sinal Wi-Fi (RSSI), status do WebSocket/CS2 GSI, botão de reconexão e telemetria básica de rede do PC (upload/download via `psutil.net_io_counters`).
-3. **Documentação e Release Oficial v2.0 no GitHub:**
-   - Atualizar `README.md` com capturas/descrição completa da v2.0 (7 telas, Media SMTC, Hardware + °C, Hub Gamer + CS2 GSI).
-   - Criar tag `v2.0` na `main` e publicar a Release no GitHub anexando `backend/dist/MiniDeckBridge.exe` e `gamestate_integration_minideck.cfg`.
-4. **Refinamentos de UX / Configurabilidade:**
-   - Avaliar renomear o card `"WATCH DOGS"` para `"WARDOGS"` (ou tornar a lista de macros/jogos configurável via arquivo JSON externo em `backend/config.json`).
-   - Adicionar botão discreto de voltar para `screen_games` dentro de `screen_game_hud` (hoje retorna à Home via `[ HOME ]`).
-   - Mover credenciais Wi-Fi (`WIFI_SSID` / `WIFI_PASS` em `firmware/src/main.cpp`) para `secrets.h` ignorado pelo Git ou portal cativo (WiFiManager/NVS) antes de tornar o repositório público.
+1. **Publicar GitHub Release `v2.3` com binário anexado:** anexar `dist/MiniDeckSetup.exe` e `backend/gamestate_integration_minideck.cfg` à Release `v2.3` no GitHub para download direto em 1 clique.
+2. **Ícone dedicado (`minideck.ico`):** criar ícone próprio para o instalador `MiniDeckSetup.exe`, atalhos do Menu Iniciar/Área de Trabalho e desinstalador.
+3. **Atualização OTA via Wi-Fi (ESP32):** permitir atualizar o firmware sem cabo USB pela rede local (`ArduinoOTA` / HTTP upload).
+4. **Brilho do Monitor Windows (DDC/CI) & Perfis por Jogo:** adicionar controle opcional de brilho do monitor principal do PC e perfis automáticos de áudio/atalhos por jogo ativo.
