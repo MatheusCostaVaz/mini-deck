@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "pins_config.h"
+#include "smarthome.h"
 #include "ui.h"
 #include "wifi_manager.h"
 
@@ -355,6 +356,44 @@ static void sendTogglePcBluetooth()
     broadcastOutgoingEvent("{\"cmd\":\"toggle_pc_bluetooth\"}");
 }
 
+static void onPierreAction(const char *action)
+{
+    if (!action) return;
+    if (strcmp(action, "start") == 0)
+    {
+        smarthome_start();
+    }
+    else if (strcmp(action, "pause") == 0)
+    {
+        smarthome_pause();
+    }
+    else if (strcmp(action, "dock") == 0)
+    {
+        smarthome_dock();
+    }
+    else if (strcmp(action, "seek") == 0)
+    {
+        smarthome_seek();
+    }
+    else if (strcmp(action, "refresh") == 0)
+    {
+        smarthome_refresh_status();
+    }
+}
+
+static void onPierreSetting(const char *code, const char *value)
+{
+    if (!code || !value) return;
+    if (strcmp(code, "suction") == 0)
+    {
+        smarthome_set_suction(value);
+    }
+    else if (strcmp(code, "cistern") == 0)
+    {
+        smarthome_set_cistern(value);
+    }
+}
+
 // ============================================================================
 // Tratamento Compartilhado de Comandos JSON (WebSocket e Serial)
 // ============================================================================
@@ -388,6 +427,12 @@ static void handleIncomingMessage(String line, bool fromWifi, uint8_t wsClientNu
             refreshConnectionBadge();
         }
         replyPong(fromWifi, wsClientNum);
+        return;
+    }
+
+    if (line.equalsIgnoreCase("PIERRE_STATUS"))
+    {
+        smarthome_refresh_status();
         return;
     }
 
@@ -796,6 +841,7 @@ static void onWifiStateChanged(bool connected, const char *ssid, const char *ip_
     (void)rssi;
 
     g_wifi_connected = connected;
+    smarthome_on_wifi_changed(connected);
     if (connected)
     {
         configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
@@ -1074,7 +1120,9 @@ void setup()
         sendLaunchGame,
         sendTogglePcBluetooth,
         wifi_mgr_start_manual_scan,
-        wifi_mgr_connect_new);
+        wifi_mgr_connect_new,
+        onPierreAction,
+        onPierreSetting);
     ui_set_system_metrics(
         ESP.getFreeHeap() / 1024U,
         ESP.getFreePsram() / 1024U,
@@ -1082,6 +1130,7 @@ void setup()
         "");
     lv_timer_handler();
 
+    smarthome_init();
     wifi_mgr_init(onWifiStateChanged);
 
     Serial.printf(
@@ -1104,6 +1153,8 @@ void loop()
     }
     checkSerialHeartbeatTimeout();
     wifi_mgr_poll();
+    smarthome_set_screen_visible(ui_get_active_screen() == UI_SCREEN_SMARTHOME);
+    smarthome_poll();
     pollClockNtp();
     pollSystemMetricsAndStandby();
     pollUdpDiscovery();

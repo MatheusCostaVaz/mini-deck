@@ -29,7 +29,7 @@ constexpr uint32_t HEX_OK           = 0x10B981;
 
 constexpr uint32_t SLIDER_THROTTLE_MS = 40;
 constexpr uint32_t TOAST_DURATION_MS  = 1600;
-constexpr int      NUM_SCREENS        = 12;
+constexpr int      NUM_SCREENS        = 13;
 
 struct ChannelUi {
     const char *target;
@@ -87,12 +87,12 @@ ChannelUi g_channels[4] = {
 
 // 6 Cards Minimalistas da Home (apenas ícone grande Phosphor 42px centralizado)
 const HubCardDef g_hub_cards[6] = {
-    HubCardDef("media",    "Mídia",        PH_ICN_MUSIC, HEX_ROSE, 0x3B1024, UI_SCREEN_MEDIA),
-    HubCardDef("mixer",    "Mixer",        PH_ICN_MIXER, HEX_CYAN, 0x083344, UI_SCREEN_AUDIO),
-    HubCardDef("light",    "Brilho",       PH_ICN_SMART, 0xFBBF24, 0x3B2608, UI_SCREEN_BRIGHTNESS),
-    HubCardDef("settings", "Configuração", PH_ICN_GEAR,  0x38BDF8, 0x0A2A43, UI_SCREEN_SETTINGS),
-    HubCardDef("macros",   "Atalhos",      PH_ICN_APP,   0xA78BFA, 0x22184A, UI_SCREEN_MACROS),
-    HubCardDef("hardware", "Hardware",     PH_ICN_CPU,   0x34D399, 0x064E3B, UI_SCREEN_HARDWARE),
+    HubCardDef("media",     "Mídia",        PH_ICN_MUSIC, HEX_ROSE, 0x3B1024, UI_SCREEN_MEDIA),
+    HubCardDef("mixer",     "Mixer",        PH_ICN_MIXER, HEX_CYAN, 0x083344, UI_SCREEN_AUDIO),
+    HubCardDef("smarthome", "Casa Intel.",  PH_ICN_SMART, 0xFBBF24, 0x3B2608, UI_SCREEN_SMARTHOME),
+    HubCardDef("settings",  "Configuração", PH_ICN_GEAR,  0x38BDF8, 0x0A2A43, UI_SCREEN_SETTINGS),
+    HubCardDef("macros",    "Atalhos",      PH_ICN_APP,   0xA78BFA, 0x22184A, UI_SCREEN_MACROS),
+    HubCardDef("hardware",  "Hardware",     PH_ICN_CPU,   0x34D399, 0x064E3B, UI_SCREEN_HARDWARE),
 };
 
 // ============================================================================
@@ -247,6 +247,26 @@ lv_obj_t *g_wifi_pwd_ta         = nullptr;
 lv_obj_t *g_wifi_pwd_eye_lbl    = nullptr;
 lv_obj_t *g_wifi_kb             = nullptr;
 
+// Widgets da Tela Casa Inteligente — Robô Pierre (screen_smarthome)
+lv_obj_t *g_pierre_batt_btn    = nullptr;
+lv_obj_t *g_pierre_batt_icon   = nullptr;
+lv_obj_t *g_pierre_batt_lbl    = nullptr;
+lv_obj_t *g_pierre_status_dot  = nullptr;
+lv_obj_t *g_pierre_status_lbl  = nullptr;
+lv_obj_t *g_pierre_fb_pill     = nullptr;
+lv_obj_t *g_pierre_fb_lbl      = nullptr;
+lv_timer_t *g_pierre_fb_timer  = nullptr;
+
+// Seletores segmentados: Sucção (3 níveis) e Fluxo de Água / Mop (4 níveis)
+lv_obj_t *g_pierre_suc_btn[3]  = {};
+lv_obj_t *g_pierre_suc_lbl[3]  = {};
+lv_obj_t *g_pierre_cis_btn[4]  = {};
+lv_obj_t *g_pierre_cis_lbl[4]  = {};
+
+bool g_pierre_online           = false;
+UiPierreSuction g_pierre_suc   = UI_SUCTION_UNKNOWN;
+UiPierreCistern g_pierre_cis   = UI_CISTERN_UNKNOWN;
+
 constexpr int MAX_WIFI_SCAN_RESULTS = 12;
 UiWifiNetwork g_wifi_scan_cache[MAX_WIFI_SCAN_RESULTS];
 int g_wifi_scan_count           = 0;
@@ -279,8 +299,10 @@ UiScreenCallback      g_screen_cb       = nullptr;
 UiMacroCallback       g_macro_cb        = nullptr;
 UiLaunchGameCallback  g_launch_game_cb  = nullptr;
 UiPcBluetoothCallback g_pc_bt_cb        = nullptr;
-UiWifiScanCallback    g_wifi_scan_cb    = nullptr;
-UiWifiConnectCallback g_wifi_connect_cb = nullptr;
+UiWifiScanCallback      g_wifi_scan_cb      = nullptr;
+UiWifiConnectCallback   g_wifi_connect_cb   = nullptr;
+UiPierreActionCallback  g_pierre_action_cb  = nullptr;
+UiPierreSettingCallback g_pierre_setting_cb = nullptr;
 
 // ============================================================================
 // Helpers Gerais
@@ -1288,6 +1310,167 @@ void system_restart_btn_cb(lv_event_t *e)
         lv_timer_handler();
     }
     restart_esp32_device();
+}
+
+// ============================================================================
+// Callbacks e Helpers da Tela Casa Inteligente — Robô Pierre (screen_smarthome)
+// ============================================================================
+void style_pierre_seg_btn(lv_obj_t *btn, lv_obj_t *lbl, bool selected, uint32_t active_bg, uint32_t active_bdr)
+{
+    if (!btn || !lbl) return;
+    if (selected)
+    {
+        lv_obj_set_style_bg_color(btn, lv_color_hex(active_bg), 0);
+        lv_obj_set_style_border_width(btn, 2, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(active_bdr), 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    }
+    else
+    {
+        lv_obj_set_style_bg_color(btn, lv_color_hex(HEX_BTN_IDLE), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(HEX_CARD_BORDER), 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+    }
+}
+
+void update_pierre_suction_visuals()
+{
+    static const UiPierreSuction MAP[3] = {
+        UI_SUCTION_GENTLE,
+        UI_SUCTION_NORMAL,
+        UI_SUCTION_STRONG,
+    };
+    for (int i = 0; i < 3; ++i)
+    {
+        style_pierre_seg_btn(
+            g_pierre_suc_btn[i],
+            g_pierre_suc_lbl[i],
+            (g_pierre_suc == MAP[i]),
+            0x0E7490,
+            HEX_CYAN);
+    }
+}
+
+void update_pierre_cistern_visuals()
+{
+    static const UiPierreCistern MAP[4] = {
+        UI_CISTERN_CLOSED,
+        UI_CISTERN_LOW,
+        UI_CISTERN_MIDDLE,
+        UI_CISTERN_HIGH,
+    };
+    for (int i = 0; i < 4; ++i)
+    {
+        style_pierre_seg_btn(
+            g_pierre_cis_btn[i],
+            g_pierre_cis_lbl[i],
+            (g_pierre_cis == MAP[i]),
+            0x0369A1,
+            0x38BDF8);
+    }
+}
+
+void pierre_fb_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (g_pierre_fb_timer)
+    {
+        lv_timer_del(g_pierre_fb_timer);
+        g_pierre_fb_timer = nullptr;
+    }
+    if (g_pierre_fb_pill && g_pierre_fb_lbl)
+    {
+        if (g_pierre_online)
+        {
+            lv_obj_set_style_bg_color(g_pierre_fb_pill, lv_color_hex(0x064E3B), 0);
+            lv_obj_set_style_border_color(g_pierre_fb_pill, lv_color_hex(0x10B981), 0);
+            lv_label_set_text(g_pierre_fb_lbl, "Pierre Online");
+            lv_obj_set_style_text_color(g_pierre_fb_lbl, lv_color_hex(0x34D399), 0);
+        }
+        else
+        {
+            lv_obj_set_style_bg_color(g_pierre_fb_pill, lv_color_hex(0x1E293B), 0);
+            lv_obj_set_style_border_color(g_pierre_fb_pill, lv_color_hex(HEX_CARD_BORDER), 0);
+            lv_label_set_text(g_pierre_fb_lbl, "Pronto");
+            lv_obj_set_style_text_color(g_pierre_fb_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+        }
+    }
+}
+
+void pierre_home_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_show_screen(UI_SCREEN_HOME, true);
+}
+
+void pierre_refresh_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_show_pierre_feedback("Atualizando...", false);
+    if (g_pierre_action_cb) g_pierre_action_cb("refresh");
+}
+
+void pierre_start_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_show_pierre_feedback("Iniciando...", false);
+    if (g_pierre_action_cb) g_pierre_action_cb("start");
+}
+
+void pierre_pause_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_show_pierre_feedback("Pausando...", false);
+    if (g_pierre_action_cb) g_pierre_action_cb("pause");
+}
+
+void pierre_dock_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_show_pierre_feedback("Retornando...", false);
+    if (g_pierre_action_cb) g_pierre_action_cb("dock");
+}
+
+void pierre_seek_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_show_pierre_feedback("Localizando...", false);
+    if (g_pierre_action_cb) g_pierre_action_cb("seek");
+}
+
+void pierre_suction_btn_cb(lv_event_t *e)
+{
+    const int idx = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    static const UiPierreSuction STATES[3] = { UI_SUCTION_GENTLE, UI_SUCTION_NORMAL, UI_SUCTION_STRONG };
+    static const char *VALUES[3] = { "gentle", "normal", "strong" };
+    if (idx < 0 || idx >= 3) return;
+
+    g_pierre_suc = STATES[idx];
+    update_pierre_suction_visuals();
+    ui_show_pierre_feedback("Enviando...", false);
+
+    if (g_pierre_setting_cb)
+    {
+        g_pierre_setting_cb("suction", VALUES[idx]);
+    }
+}
+
+void pierre_cistern_btn_cb(lv_event_t *e)
+{
+    const int idx = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    static const UiPierreCistern STATES[4] = { UI_CISTERN_CLOSED, UI_CISTERN_LOW, UI_CISTERN_MIDDLE, UI_CISTERN_HIGH };
+    static const char *VALUES[4] = { "closed", "low", "middle", "high" };
+    if (idx < 0 || idx >= 4) return;
+
+    g_pierre_cis = STATES[idx];
+    update_pierre_cistern_visuals();
+    ui_show_pierre_feedback("Enviando...", false);
+
+    if (g_pierre_setting_cb)
+    {
+        g_pierre_setting_cb("cistern", VALUES[idx]);
+    }
 }
 
 // ============================================================================
@@ -3268,6 +3451,359 @@ void build_screen_screensaver()
     update_screensaver_weather_visuals();
 }
 
+// ============================================================================
+// Tela 13: screen_smarthome (Casa Inteligente — Controle Operacional do Pierre)
+//   A. Header Universal (58px): [ < ] | CASA INTELIGENTE · PIERRE | [ ⚡ 92% ]
+//   B. Bloco 1 (74px): Status em Tempo Real + [ INICIAR ] [ PAUSAR ] [ VOLTAR P/ BASE ]
+//   C. Bloco 2 (122px): Potência de Sucção (3x) + Fluxo de Água / Mop (4x)
+//   D. Bloco 3 (42px): [ 🔍 Localizar Pierre ] + Pill de Toast / Feedback
+// ============================================================================
+void build_screen_smarthome()
+{
+    lv_obj_t *scr = lv_obj_create(nullptr);
+    g_screens[UI_SCREEN_SMARTHOME] = scr;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(HEX_BG), 0);
+
+    // ---- A. Cabeçalho Universal (58 px) ----
+    lv_obj_t *header = lv_obj_create(scr);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_pos(header, 6, 4);
+    lv_obj_set_size(header, 468, 58);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(header, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_set_style_radius(header, 14, 0);
+
+    // Botão Esquerdo: Voltar "<" -> screen_home
+    lv_obj_t *back_btn = lv_btn_create(header);
+    lv_obj_remove_style_all(back_btn);
+    lv_obj_set_size(back_btn, 56, 46);
+    lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, 6, 0);
+    lv_obj_set_ext_click_area(back_btn, 8);
+    lv_obj_set_style_radius(back_btn, 12, 0);
+    lv_obj_set_style_bg_opa(back_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(back_btn, lv_color_hex(HEX_BTN_IDLE), 0);
+    lv_obj_set_style_bg_color(back_btn, lv_color_hex(0x083344), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(back_btn, 2, 0);
+    lv_obj_set_style_border_color(back_btn, lv_color_hex(HEX_CYAN), 0);
+    lv_obj_add_event_cb(back_btn, pierre_home_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *back_ic = lv_label_create(back_btn);
+    lv_label_set_text(back_ic, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(back_ic, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(back_ic, lv_color_hex(HEX_CYAN), 0);
+    lv_obj_center(back_ic);
+
+    // Título Central: CASA INTELIGENTE · PIERRE
+    lv_obj_t *center_box = lv_obj_create(header);
+    lv_obj_remove_style_all(center_box);
+    lv_obj_set_size(center_box, 302, 44);
+    lv_obj_align(center_box, LV_ALIGN_LEFT_MID, 68, 0);
+    lv_obj_clear_flag(center_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_layout(center_box, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(center_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(center_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(center_box, 6, 0);
+
+    lv_obj_t *title_ic = lv_label_create(center_box);
+    lv_label_set_text(title_ic, PH_ICN_SMART);
+    lv_obj_set_style_text_font(title_ic, &phosphor_20, 0);
+    lv_obj_set_style_text_color(title_ic, lv_color_hex(0xFBBF24), 0);
+
+    lv_obj_t *title_lbl = lv_label_create(center_box);
+    lv_label_set_text(title_lbl, "CASA INTELIGENTE \xC2\xB7 PIERRE");
+    lv_obj_set_style_text_font(title_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(title_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    // Canto Direito: Bateria em tempo real (toque atualiza /status)
+    g_pierre_batt_btn = lv_btn_create(header);
+    lv_obj_remove_style_all(g_pierre_batt_btn);
+    lv_obj_set_size(g_pierre_batt_btn, 90, 44);
+    lv_obj_align(g_pierre_batt_btn, LV_ALIGN_RIGHT_MID, -6, 0);
+    lv_obj_set_ext_click_area(g_pierre_batt_btn, 6);
+    lv_obj_set_style_radius(g_pierre_batt_btn, 12, 0);
+    lv_obj_set_style_bg_opa(g_pierre_batt_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_pierre_batt_btn, lv_color_hex(0x162033), 0);
+    lv_obj_set_style_bg_color(g_pierre_batt_btn, lv_color_hex(0x1E293B), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(g_pierre_batt_btn, 2, 0);
+    lv_obj_set_style_border_color(g_pierre_batt_btn, lv_color_hex(HEX_CARD_BORDER), 0);
+    lv_obj_set_layout(g_pierre_batt_btn, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(g_pierre_batt_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(g_pierre_batt_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(g_pierre_batt_btn, 5, 0);
+    lv_obj_add_event_cb(g_pierre_batt_btn, pierre_refresh_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    g_pierre_batt_icon = lv_label_create(g_pierre_batt_btn);
+    lv_label_set_text(g_pierre_batt_icon, LV_SYMBOL_BATTERY_FULL);
+    lv_obj_set_style_text_font(g_pierre_batt_icon, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(g_pierre_batt_icon, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    g_pierre_batt_lbl = lv_label_create(g_pierre_batt_btn);
+    lv_label_set_text(g_pierre_batt_lbl, "--%");
+    lv_obj_set_style_text_font(g_pierre_batt_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(g_pierre_batt_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    // ---- B. Bloco 1: Status em Tempo Real & 3 Ações Principais ----
+    lv_obj_t *act_card = lv_obj_create(scr);
+    lv_obj_remove_style_all(act_card);
+    lv_obj_set_pos(act_card, 6, 67);
+    lv_obj_set_size(act_card, 468, 74);
+    lv_obj_clear_flag(act_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(act_card, 14, 0);
+    lv_obj_set_style_bg_opa(act_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(act_card, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(act_card, 1, 0);
+    lv_obj_set_style_border_color(act_card, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    lv_obj_t *top_accent = lv_obj_create(act_card);
+    lv_obj_remove_style_all(top_accent);
+    lv_obj_set_size(top_accent, 56, 3);
+    lv_obj_set_style_radius(top_accent, 2, 0);
+    lv_obj_set_style_bg_opa(top_accent, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(top_accent, lv_color_hex(0xFBBF24), 0);
+    lv_obj_align(top_accent, LV_ALIGN_TOP_MID, 0, 0);
+
+    g_pierre_status_dot = lv_obj_create(act_card);
+    lv_obj_remove_style_all(g_pierre_status_dot);
+    lv_obj_set_pos(g_pierre_status_dot, 12, 12);
+    lv_obj_set_size(g_pierre_status_dot, 10, 10);
+    lv_obj_set_style_radius(g_pierre_status_dot, 5, 0);
+    lv_obj_set_style_bg_opa(g_pierre_status_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_pierre_status_dot, lv_color_hex(HEX_WARN), 0);
+
+    g_pierre_status_lbl = lv_label_create(act_card);
+    lv_label_set_text(g_pierre_status_lbl, "Status: Aguardando atualiza\xC3\xA7\xC3\xA3o...");
+    lv_obj_set_pos(g_pierre_status_lbl, 28, 7);
+    lv_obj_set_width(g_pierre_status_lbl, 428);
+    lv_label_set_long_mode(g_pierre_status_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_font(g_pierre_status_lbl, &inter_medium_16, 0);
+    lv_obj_set_style_text_color(g_pierre_status_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    // 1. [ ▶ INICIAR ] (Verde escuro + borda esmeralda -> POST /start)
+    lv_obj_t *start_btn = lv_btn_create(act_card);
+    lv_obj_remove_style_all(start_btn);
+    lv_obj_set_pos(start_btn, 10, 31);
+    lv_obj_set_size(start_btn, 138, 37);
+    lv_obj_set_style_radius(start_btn, 10, 0);
+    lv_obj_set_style_bg_opa(start_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(start_btn, lv_color_hex(0x065F46), 0);
+    lv_obj_set_style_bg_color(start_btn, lv_color_hex(0x047857), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(start_btn, 2, 0);
+    lv_obj_set_style_border_color(start_btn, lv_color_hex(0x10B981), 0);
+    lv_obj_set_layout(start_btn, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(start_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(start_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(start_btn, 6, 0);
+    lv_obj_add_event_cb(start_btn, pierre_start_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *start_ic = lv_label_create(start_btn);
+    lv_label_set_text(start_ic, LV_SYMBOL_PLAY);
+    lv_obj_set_style_text_font(start_ic, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(start_ic, lv_color_hex(0x34D399), 0);
+
+    lv_obj_t *start_lbl = lv_label_create(start_btn);
+    lv_label_set_text(start_lbl, "INICIAR");
+    lv_obj_set_style_text_font(start_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(start_lbl, lv_color_hex(0xFFFFFF), 0);
+
+    // 2. [ ⏸ PAUSAR ] (Azul/Cinza escuro -> POST /pause)
+    lv_obj_t *pause_btn = lv_btn_create(act_card);
+    lv_obj_remove_style_all(pause_btn);
+    lv_obj_set_pos(pause_btn, 155, 31);
+    lv_obj_set_size(pause_btn, 134, 37);
+    lv_obj_set_style_radius(pause_btn, 10, 0);
+    lv_obj_set_style_bg_opa(pause_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(pause_btn, lv_color_hex(0x1E3A5F), 0);
+    lv_obj_set_style_bg_color(pause_btn, lv_color_hex(0x1E293B), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(pause_btn, 2, 0);
+    lv_obj_set_style_border_color(pause_btn, lv_color_hex(0x60A5FA), 0);
+    lv_obj_set_layout(pause_btn, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(pause_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pause_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(pause_btn, 6, 0);
+    lv_obj_add_event_cb(pause_btn, pierre_pause_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *pause_ic = lv_label_create(pause_btn);
+    lv_label_set_text(pause_ic, LV_SYMBOL_PAUSE);
+    lv_obj_set_style_text_font(pause_ic, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(pause_ic, lv_color_hex(0x93C5FD), 0);
+
+    lv_obj_t *pause_lbl = lv_label_create(pause_btn);
+    lv_label_set_text(pause_lbl, "PAUSAR");
+    lv_obj_set_style_text_font(pause_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(pause_lbl, lv_color_hex(0xFFFFFF), 0);
+
+    // 3. [ ⚡ VOLTAR P/ BASE ] (Âmbar/Laranja -> POST /dock)
+    lv_obj_t *dock_btn = lv_btn_create(act_card);
+    lv_obj_remove_style_all(dock_btn);
+    lv_obj_set_pos(dock_btn, 296, 31);
+    lv_obj_set_size(dock_btn, 162, 37);
+    lv_obj_set_style_radius(dock_btn, 10, 0);
+    lv_obj_set_style_bg_opa(dock_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(dock_btn, lv_color_hex(0x92400E), 0);
+    lv_obj_set_style_bg_color(dock_btn, lv_color_hex(0x78350F), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(dock_btn, 2, 0);
+    lv_obj_set_style_border_color(dock_btn, lv_color_hex(0xF59E0B), 0);
+    lv_obj_set_layout(dock_btn, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(dock_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(dock_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(dock_btn, 5, 0);
+    lv_obj_add_event_cb(dock_btn, pierre_dock_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *dock_ic = lv_label_create(dock_btn);
+    lv_label_set_text(dock_ic, LV_SYMBOL_CHARGE);
+    lv_obj_set_style_text_font(dock_ic, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(dock_ic, lv_color_hex(0xFDE68A), 0);
+
+    lv_obj_t *dock_lbl = lv_label_create(dock_btn);
+    lv_label_set_text(dock_lbl, "VOLTAR P/ BASE");
+    lv_obj_set_style_text_font(dock_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(dock_lbl, lv_color_hex(0xFFFFFF), 0);
+
+    // ---- C. Bloco 2: Seletores de Potência de Sucção e Fluxo de Água ----
+    lv_obj_t *ctrl_card = lv_obj_create(scr);
+    lv_obj_remove_style_all(ctrl_card);
+    lv_obj_set_pos(ctrl_card, 6, 146);
+    lv_obj_set_size(ctrl_card, 468, 122);
+    lv_obj_clear_flag(ctrl_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(ctrl_card, 14, 0);
+    lv_obj_set_style_bg_opa(ctrl_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(ctrl_card, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(ctrl_card, 1, 0);
+    lv_obj_set_style_border_color(ctrl_card, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    // 1. Seletor de Sucção: Silencioso | Normal | Forte
+    lv_obj_t *suc_hdr = lv_label_create(ctrl_card);
+    lv_label_set_text(suc_hdr, "POT\xC3\x8ANCIA DE SUC\xC3\x87\xC3\x83O");
+    lv_obj_set_pos(suc_hdr, 12, 5);
+    lv_obj_set_style_text_font(suc_hdr, &inter_16, 0);
+    lv_obj_set_style_text_color(suc_hdr, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    static const char *SUC_LABELS[3] = { "Silencioso", "Normal", "Forte" };
+    for (int i = 0; i < 3; ++i)
+    {
+        lv_obj_t *btn = lv_btn_create(ctrl_card);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_pos(btn, 10 + (i * 152), 25);
+        lv_obj_set_size(btn, 144, 33);
+        lv_obj_set_style_radius(btn, 9, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x083344), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(
+            btn,
+            pierre_suction_btn_cb,
+            LV_EVENT_CLICKED,
+            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, SUC_LABELS[i]);
+        lv_obj_set_style_text_font(lbl, &inter_bold_16, 0);
+        lv_obj_center(lbl);
+
+        g_pierre_suc_btn[i] = btn;
+        g_pierre_suc_lbl[i] = lbl;
+    }
+
+    // 2. Seletor de Água / Mop: Sem Água | Baixo | Médio | Alto
+    lv_obj_t *cis_hdr = lv_label_create(ctrl_card);
+    lv_label_set_text(cis_hdr, "FLUXO DE \xC3\x81GUA (MOP)");
+    lv_obj_set_pos(cis_hdr, 12, 63);
+    lv_obj_set_style_text_font(cis_hdr, &inter_16, 0);
+    lv_obj_set_style_text_color(cis_hdr, lv_color_hex(HEX_TEXT_DIM), 0);
+
+    static const char *CIS_LABELS[4] = { "Sem \xC3\x81gua", "Baixo", "M\xC3\xA9" "dio", "Alto" };
+    for (int i = 0; i < 4; ++i)
+    {
+        lv_obj_t *btn = lv_btn_create(ctrl_card);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_pos(btn, 10 + (i * 114), 83);
+        lv_obj_set_size(btn, 106, 33);
+        lv_obj_set_style_radius(btn, 9, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x075985), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(
+            btn,
+            pierre_cistern_btn_cb,
+            LV_EVENT_CLICKED,
+            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, CIS_LABELS[i]);
+        lv_obj_set_style_text_font(lbl, &inter_bold_16, 0);
+        lv_obj_center(lbl);
+
+        g_pierre_cis_btn[i] = btn;
+        g_pierre_cis_lbl[i] = lbl;
+    }
+
+    // ---- D. Bloco 3: Utilidades Extras (Rodapé — Localizar + Feedback) ----
+    lv_obj_t *footer = lv_obj_create(scr);
+    lv_obj_remove_style_all(footer);
+    lv_obj_set_pos(footer, 6, 273);
+    lv_obj_set_size(footer, 468, 42);
+    lv_obj_clear_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(footer, 12, 0);
+    lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(footer, lv_color_hex(HEX_CARD), 0);
+    lv_obj_set_style_border_width(footer, 1, 0);
+    lv_obj_set_style_border_color(footer, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    // Botão [ 🔍 Localizar Pierre ] -> POST /command {"code":"seek","value":true}
+    lv_obj_t *seek_btn = lv_btn_create(footer);
+    lv_obj_remove_style_all(seek_btn);
+    lv_obj_set_pos(seek_btn, 6, 4);
+    lv_obj_set_size(seek_btn, 206, 34);
+    lv_obj_set_style_radius(seek_btn, 9, 0);
+    lv_obj_set_style_bg_opa(seek_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(seek_btn, lv_color_hex(HEX_BTN_IDLE), 0);
+    lv_obj_set_style_bg_color(seek_btn, lv_color_hex(0x312E81), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(seek_btn, 1, 0);
+    lv_obj_set_style_border_color(seek_btn, lv_color_hex(0x818CF8), 0);
+    lv_obj_set_layout(seek_btn, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(seek_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(seek_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(seek_btn, 7, 0);
+    lv_obj_add_event_cb(seek_btn, pierre_seek_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *seek_ic = lv_label_create(seek_btn);
+    lv_label_set_text(seek_ic, PH_ICN_SEARCH);
+    lv_obj_set_style_text_font(seek_ic, &phosphor_20, 0);
+    lv_obj_set_style_text_color(seek_ic, lv_color_hex(0xA78BFA), 0);
+
+    lv_obj_t *seek_lbl = lv_label_create(seek_btn);
+    lv_label_set_text(seek_lbl, "Localizar Pierre");
+    lv_obj_set_style_text_font(seek_lbl, &inter_bold_16, 0);
+    lv_obj_set_style_text_color(seek_lbl, lv_color_hex(HEX_TEXT_MAIN), 0);
+
+    // Label discreto de Toast / Feedback no rodapé
+    g_pierre_fb_pill = lv_obj_create(footer);
+    lv_obj_remove_style_all(g_pierre_fb_pill);
+    lv_obj_set_pos(g_pierre_fb_pill, 220, 5);
+    lv_obj_set_size(g_pierre_fb_pill, 240, 32);
+    lv_obj_clear_flag(g_pierre_fb_pill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(g_pierre_fb_pill, 9, 0);
+    lv_obj_set_style_bg_opa(g_pierre_fb_pill, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_pierre_fb_pill, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_width(g_pierre_fb_pill, 1, 0);
+    lv_obj_set_style_border_color(g_pierre_fb_pill, lv_color_hex(HEX_CARD_BORDER), 0);
+
+    g_pierre_fb_lbl = lv_label_create(g_pierre_fb_pill);
+    lv_label_set_text(g_pierre_fb_lbl, "Pronto");
+    lv_obj_set_width(g_pierre_fb_lbl, 226);
+    lv_label_set_long_mode(g_pierre_fb_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_align(g_pierre_fb_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(g_pierre_fb_lbl, &inter_16, 0);
+    lv_obj_set_style_text_color(g_pierre_fb_lbl, lv_color_hex(HEX_TEXT_DIM), 0);
+    lv_obj_center(g_pierre_fb_lbl);
+
+    update_pierre_suction_visuals();
+    update_pierre_cistern_visuals();
+}
+
 void apply_home_conn_badge_style(UiConnState state)
 {
     if (!g_home_conn_badge || !g_home_conn_label) return;
@@ -3326,7 +3862,9 @@ void ui_init(
     UiLaunchGameCallback on_launch_game,
     UiPcBluetoothCallback on_pc_bt_toggle,
     UiWifiScanCallback on_wifi_scan,
-    UiWifiConnectCallback on_wifi_connect)
+    UiWifiConnectCallback on_wifi_connect,
+    UiPierreActionCallback on_pierre_action,
+    UiPierreSettingCallback on_pierre_setting)
 {
     g_vol_cb = on_volume_change;
     g_mute_cb = on_mute_toggle;
@@ -3337,6 +3875,8 @@ void ui_init(
     g_pc_bt_cb = on_pc_bt_toggle;
     g_wifi_scan_cb = on_wifi_scan;
     g_wifi_connect_cb = on_wifi_connect;
+    g_pierre_action_cb = on_pierre_action;
+    g_pierre_setting_cb = on_pierre_setting;
 
     build_screen_home();
     build_screen_audio();
@@ -3350,6 +3890,7 @@ void ui_init(
     build_screen_brightness();
     build_screen_system();
     build_screen_screensaver();
+    build_screen_smarthome();
 
     update_mic_visuals();
     for (SidebarWidgets *msb : g_master_sidebars)
@@ -3397,6 +3938,7 @@ void ui_show_screen(UiScreenId screen_id, bool animate)
         else if (screen_id == UI_SCREEN_WIFI) name = "wifi";
         else if (screen_id == UI_SCREEN_BRIGHTNESS) name = "brightness";
         else if (screen_id == UI_SCREEN_SYSTEM) name = "system";
+        else if (screen_id == UI_SCREEN_SMARTHOME) name = "smarthome";
         g_screen_cb(name);
     }
 }
@@ -4150,6 +4692,187 @@ UiScreenId ui_get_active_screen()
 bool ui_is_wifi_modal_open()
 {
     return (g_wifi_modal != nullptr) && !lv_obj_has_flag(g_wifi_modal, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_sync_pierre_status(
+    bool online,
+    int battery_pct,
+    bool charging,
+    UiPierreState state,
+    UiPierreSuction suction,
+    UiPierreCistern cistern,
+    const char *status_text,
+    bool busy)
+{
+    g_pierre_online = online;
+
+    if (suction != UI_SUCTION_UNKNOWN)
+    {
+        g_pierre_suc = suction;
+        update_pierre_suction_visuals();
+    }
+    if (cistern != UI_CISTERN_UNKNOWN)
+    {
+        g_pierre_cis = cistern;
+        update_pierre_cistern_visuals();
+    }
+
+    if (g_pierre_batt_btn && g_pierre_batt_icon && g_pierre_batt_lbl)
+    {
+        if (battery_pct >= 0 && battery_pct <= 100)
+        {
+            char bbuf[12];
+            snprintf(bbuf, sizeof(bbuf), "%d%%", battery_pct);
+            lv_label_set_text(g_pierre_batt_lbl, bbuf);
+
+            uint32_t bdr_hex = HEX_OK;
+            uint32_t bg_hex  = 0x064E3B;
+            uint32_t ic_hex  = 0x34D399;
+            const char *ic   = LV_SYMBOL_BATTERY_FULL;
+
+            if (charging)
+            {
+                ic = LV_SYMBOL_CHARGE;
+                bdr_hex = 0xFBBF24;
+                bg_hex  = 0x2D1E07;
+                ic_hex  = 0xFBBF24;
+            }
+            else if (battery_pct <= 20)
+            {
+                ic = LV_SYMBOL_BATTERY_1;
+                bdr_hex = 0xEF4444;
+                bg_hex  = 0x450A0A;
+                ic_hex  = 0xF87171;
+            }
+            else if (battery_pct <= 50)
+            {
+                ic = LV_SYMBOL_BATTERY_2;
+                bdr_hex = HEX_WARN;
+                bg_hex  = 0x2D1E07;
+                ic_hex  = 0xFBBF24;
+            }
+            else if (battery_pct <= 80)
+            {
+                ic = LV_SYMBOL_BATTERY_3;
+            }
+
+            lv_label_set_text(g_pierre_batt_icon, ic);
+            lv_obj_set_style_text_color(g_pierre_batt_icon, lv_color_hex(ic_hex), 0);
+            lv_obj_set_style_bg_color(g_pierre_batt_btn, lv_color_hex(bg_hex), 0);
+            lv_obj_set_style_border_color(g_pierre_batt_btn, lv_color_hex(bdr_hex), 0);
+        }
+        else
+        {
+            lv_label_set_text(g_pierre_batt_lbl, "--%");
+            lv_label_set_text(g_pierre_batt_icon, LV_SYMBOL_BATTERY_EMPTY);
+            lv_obj_set_style_text_color(g_pierre_batt_icon, lv_color_hex(HEX_TEXT_DIM), 0);
+            lv_obj_set_style_bg_color(g_pierre_batt_btn, lv_color_hex(0x162033), 0);
+            lv_obj_set_style_border_color(g_pierre_batt_btn, lv_color_hex(HEX_CARD_BORDER), 0);
+        }
+    }
+
+    if (g_pierre_status_lbl && status_text && status_text[0] != '\0')
+    {
+        lv_label_set_text(g_pierre_status_lbl, status_text);
+    }
+
+    if (g_pierre_status_dot)
+    {
+        uint32_t dot_hex = HEX_TEXT_DIM;
+        if (!online)
+        {
+            dot_hex = 0xEF4444;
+        }
+        else if (state == UI_PIERRE_CLEANING)
+        {
+            dot_hex = 0x10B981;
+        }
+        else if (state == UI_PIERRE_CHARGING || state == UI_PIERRE_DOCKING)
+        {
+            dot_hex = 0xFBBF24;
+        }
+        else if (state == UI_PIERRE_PAUSED)
+        {
+            dot_hex = 0x60A5FA;
+        }
+        else if (state == UI_PIERRE_ERROR)
+        {
+            dot_hex = 0xEF4444;
+        }
+        else
+        {
+            dot_hex = 0x34D399;
+        }
+        lv_obj_set_style_bg_color(g_pierre_status_dot, lv_color_hex(dot_hex), 0);
+    }
+
+    if (!busy && !g_pierre_fb_timer && g_pierre_fb_pill && g_pierre_fb_lbl)
+    {
+        if (online)
+        {
+            lv_obj_set_style_bg_color(g_pierre_fb_pill, lv_color_hex(0x064E3B), 0);
+            lv_obj_set_style_border_color(g_pierre_fb_pill, lv_color_hex(0x10B981), 0);
+            lv_label_set_text(g_pierre_fb_lbl, "Pierre Online");
+            lv_obj_set_style_text_color(g_pierre_fb_lbl, lv_color_hex(0x34D399), 0);
+        }
+        else
+        {
+            lv_obj_set_style_bg_color(g_pierre_fb_pill, lv_color_hex(0x450A0A), 0);
+            lv_obj_set_style_border_color(g_pierre_fb_pill, lv_color_hex(0xEF4444), 0);
+            lv_label_set_text(g_pierre_fb_lbl, "Offline");
+            lv_obj_set_style_text_color(g_pierre_fb_lbl, lv_color_hex(0xFCA5A5), 0);
+        }
+    }
+}
+
+void ui_show_pierre_feedback(const char *message, bool is_error)
+{
+    if (!g_pierre_fb_pill || !g_pierre_fb_lbl || !message) return;
+
+    if (g_pierre_fb_timer)
+    {
+        lv_timer_del(g_pierre_fb_timer);
+        g_pierre_fb_timer = nullptr;
+    }
+
+    const bool is_pending = (
+        strstr(message, "Enviando") != nullptr ||
+        strstr(message, "Atualizando") != nullptr ||
+        strstr(message, "Iniciando") != nullptr ||
+        strstr(message, "Pausando") != nullptr ||
+        strstr(message, "Retornando") != nullptr ||
+        strstr(message, "Localizando") != nullptr);
+
+    uint32_t bg_hex  = 0x064E3B;
+    uint32_t bdr_hex = 0x34D399;
+    uint32_t txt_hex = 0xA7F3D0;
+
+    if (is_error)
+    {
+        bg_hex  = 0x450A0A;
+        bdr_hex = 0xEF4444;
+        txt_hex = 0xFCA5A5;
+    }
+    else if (is_pending)
+    {
+        bg_hex  = 0x2D1E07;
+        bdr_hex = 0xFBBF24;
+        txt_hex = 0xFDE68A;
+    }
+
+    lv_obj_set_style_bg_color(g_pierre_fb_pill, lv_color_hex(bg_hex), 0);
+    lv_obj_set_style_border_color(g_pierre_fb_pill, lv_color_hex(bdr_hex), 0);
+    lv_label_set_text(g_pierre_fb_lbl, message);
+    lv_obj_set_style_text_color(g_pierre_fb_lbl, lv_color_hex(txt_hex), 0);
+
+    if (!is_pending)
+    {
+        g_pierre_fb_timer = lv_timer_create(pierre_fb_timer_cb, 4000, nullptr);
+        if (g_pierre_fb_timer)
+        {
+            lv_timer_set_repeat_count(g_pierre_fb_timer, 1);
+        }
+    }
 }
 
 void ui_enter_screensaver()
