@@ -65,6 +65,32 @@ enum UiScreenId : uint8_t {
     UI_SCREEN_BRIGHTNESS = 9,
     UI_SCREEN_SYSTEM = 10,
     UI_SCREEN_SCREENSAVER = 11,
+    UI_SCREEN_SMARTHOME = 12,
+};
+
+enum UiPierreState : uint8_t {
+    UI_PIERRE_UNKNOWN  = 0,
+    UI_PIERRE_CHARGING = 1,
+    UI_PIERRE_DOCKING  = 2,
+    UI_PIERRE_CLEANING = 3,
+    UI_PIERRE_PAUSED   = 4,
+    UI_PIERRE_IDLE     = 5,
+    UI_PIERRE_ERROR    = 6,
+};
+
+enum UiPierreSuction : uint8_t {
+    UI_SUCTION_UNKNOWN = 0,
+    UI_SUCTION_GENTLE  = 1,
+    UI_SUCTION_NORMAL  = 2,
+    UI_SUCTION_STRONG  = 3,
+};
+
+enum UiPierreCistern : uint8_t {
+    UI_CISTERN_UNKNOWN = 0,
+    UI_CISTERN_CLOSED  = 1,
+    UI_CISTERN_LOW     = 2,
+    UI_CISTERN_MIDDLE  = 3,
+    UI_CISTERN_HIGH    = 4,
 };
 
 struct UiWifiNetwork {
@@ -91,10 +117,12 @@ using UiScreenCallback      = void (*)(const char *screen_name);
 using UiMacroCallback       = void (*)(const char *action);
 using UiLaunchGameCallback  = void (*)(const char *game_id);
 using UiPcBluetoothCallback = void (*)(void);
-using UiWifiScanCallback    = void (*)(void);
-using UiWifiConnectCallback = void (*)(const char *ssid, const char *password);
+using UiWifiScanCallback     = void (*)(void);
+using UiWifiConnectCallback  = void (*)(const char *ssid, const char *password);
+using UiPierreActionCallback  = void (*)(const char *action); // "start", "pause", "dock", "seek", "refresh"
+using UiPierreSettingCallback = void (*)(const char *code, const char *value); // "suction"|"cistern"
 
-// Inicializa arquitetura multi-screen LVGL (Home, Mixer, Mídia, Hardware, Atalhos, Jogos, Game HUD, Conexões)
+// Inicializa arquitetura multi-screen LVGL (Home, Mixer, Mídia, Hardware, Atalhos, Jogos, Game HUD, Config, SmartHome)
 void ui_init(
     UiVolumeCallback on_volume_change,
     UiMuteCallback on_mute_toggle,
@@ -104,7 +132,9 @@ void ui_init(
     UiLaunchGameCallback on_launch_game = nullptr,
     UiPcBluetoothCallback on_pc_bt_toggle = nullptr,
     UiWifiScanCallback on_wifi_scan = nullptr,
-    UiWifiConnectCallback on_wifi_connect = nullptr);
+    UiWifiConnectCallback on_wifi_connect = nullptr,
+    UiPierreActionCallback on_pierre_action = nullptr,
+    UiPierreSettingCallback on_pierre_setting = nullptr);
 
 // Navegação entre telas
 void ui_show_screen(UiScreenId screen_id, bool animate = true);
@@ -146,6 +176,18 @@ void ui_wake_screensaver();
 bool ui_is_screensaver_active();
 UiScreenId ui_get_active_screen();
 bool ui_is_wifi_modal_open();
+
+// Casa Inteligente — Robô Aspirador Pierre (atualização thread-safe a partir do Core 1)
+void ui_sync_pierre_status(
+    bool online,
+    int battery_pct,
+    bool charging,
+    UiPierreState state,
+    UiPierreSuction suction,
+    UiPierreCistern cistern,
+    const char *status_text,
+    bool busy);
+void ui_show_pierre_feedback(const char *message, bool is_error = false);
 
 // Controle de brilho PWM, Standby NVS e Reinicialização (implementados em main.cpp)
 void set_screen_brightness(uint8_t percentage);
